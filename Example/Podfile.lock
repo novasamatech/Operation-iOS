@@ -1,0 +1,23 @@
+PODS:
+  - FireMock (3.1)
+  - Operation-iOS (1.0.0)
+
+DEPENDENCIES:
+  - FireMock
+  - Operation-iOS (from `../`)
+
+SPEC REPOS:
+  trunk:
+    - FireMock
+
+EXTERNAL SOURCES:
+  Operation-iOS:
+    :path: "../"
+
+SPEC CHECKSUMS:
+  FireMock: 3eed872059c12f94855413347da83b9d6d1a6fac
+  Operation-iOS: 4aa0bf086d30854483e55370e80889c8c18ecd23
+
+PODFILE CHECKSUM: 4981e9b54b291cc3efe95a34c1b26d7e31b9518a
+
+COCOAPODS: 1.15.2
