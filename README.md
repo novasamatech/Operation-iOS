@@ -14,4 +14,4 @@ ERussel, emkil.russel@gmail.com
 
 ## License
 
-UIKit-iOS is available under the Apache 2.0 license. See the LICENSE file for more info.
+Operation-iOS is available under the Apache 2.0 license. See the LICENSE file for more info.
