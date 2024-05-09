@@ -42,64 +42,41 @@ public final class NetworkOperation<ResultType>: BaseOperation<ResultType> {
 
         super.init()
     }
+    
+    override public func performAsync(_ callback: @escaping (Result<ResultType, Error>) -> Void) throws {
+        var request = try requestFactory.createRequest()
 
-    override public func main() {
-        super.main()
+        if let modifier = requestModifier {
+            request = try modifier.modify(request: request)
+        }
 
         if isCancelled {
+            finish()
             return
         }
 
-        if result != nil {
-            return
-        }
+        let dataTask = networkSession.dataTask(with: request) { (data, response, error) in
 
-        do {
-            var request = try requestFactory.createRequest()
-
-            if let modifier = requestModifier {
-                request = try modifier.modify(request: request)
-            }
-
-            let semaphore = DispatchSemaphore(value: 0)
-
-            var receivedData: Data?
-            var receivedResponse: URLResponse?
-            var receivedError: Error?
-
-            if isCancelled {
+            if let error, NetworkOperationHelper.isCancellation(error: error) {
                 return
             }
 
-            let dataTask = networkSession.dataTask(with: request) { (data, response, error) in
-
-                receivedData = data
-                receivedResponse = response
-                receivedError = error
-
-                semaphore.signal()
-            }
-
-            networkTask = dataTask
-            dataTask.resume()
-
-            _ = semaphore.wait(timeout: .distantFuture)
-
-            if let error = receivedError, NetworkOperationHelper.isCancellation(error: error) {
-                return
-            }
-
-            result = resultFactory.createResult(data: receivedData,
-                                                response: receivedResponse, error: receivedError)
-
-        } catch {
-            result = .failure(error)
+            let result = self.resultFactory.createResult(
+                data: data,
+                response: response,
+                error: error
+            )
+            
+            callback(result)
         }
+
+        networkTask = dataTask
+        dataTask.resume()
     }
 
     override public func cancel() {
         networkTask?.cancel()
-
+        
         super.cancel()
     }
 }
