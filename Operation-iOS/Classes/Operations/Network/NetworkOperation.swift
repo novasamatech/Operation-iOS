@@ -13,10 +13,6 @@ public final class NetworkOperation<ResultType>: BaseOperation<ResultType> {
     /// Network session to create intenal network data task. By default shared session is used.
     public lazy var networkSession: URLSession = URLSession.shared
 
-    /// Network indicator manager to maintain network indicator display.
-    /// By default ```NetworkIndicatorManager.shared```.
-    public lazy var networkIndicatorManager: NetworkIndicatorManagerProtocol = NetworkIndicatorManager.shared
-
     /// Modifies created request. Pass this object modify requests of the application in a common way.
     /// For example, provide additional fields in the header or include signature.
     /// Otherwise, consider to create specific custom request in ```NetworkRequestFactoryProtocol```
@@ -73,12 +69,6 @@ public final class NetworkOperation<ResultType>: BaseOperation<ResultType> {
 
             if isCancelled {
                 return
-            }
-
-            networkIndicatorManager.increment()
-
-            defer {
-                networkIndicatorManager.decrement()
             }
 
             let dataTask = networkSession.dataTask(with: request) { (data, response, error) in
