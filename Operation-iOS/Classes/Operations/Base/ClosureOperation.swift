@@ -23,22 +23,8 @@ public final class ClosureOperation<ResultType>: BaseOperation<ResultType> {
         self.closure = closure
     }
 
-    override public func main() {
-        super.main()
-
-        if isCancelled {
-            return
-        }
-
-        if result != nil {
-            return
-        }
-
-        do {
-            let executionResult = try closure()
-            result = .success(executionResult)
-        } catch {
-            result = .failure(error)
-        }
+    override public func performAsync(_ callback: @escaping (Result<ResultType, Error>) -> Void) throws {
+        let result = try closure()
+        callback(.success(result))
     }
 }
