@@ -160,13 +160,11 @@ open class BaseOperation<ResultType>: Operation {
     open override func main() {
         do {
             try performAsync { operationResult in
-                self.result = operationResult
-                self.finish()
+                self.completeWithResultIfExecuting(operationResult)
             }
 
         } catch {
-            result = .failure(error)
-            finish()
+            completeWithResultIfExecuting(.failure(error))
         }
     }
     
@@ -174,10 +172,21 @@ open class BaseOperation<ResultType>: Operation {
         configurationBlock = nil
         
         super.cancel()
+        
+        finish()
     }
 
     open func performAsync(_ callback: @escaping (Result<ResultType, Error>) -> Void) throws {
         fatalError("Must be overriden by subsclass")
+    }
+ 
+    func completeWithResultIfExecuting(_ result: Result<ResultType, Error>) {
+        guard isExecuting else {
+            return
+        }
+        
+        self.result = result
+        finish()
     }
     
     func finish() {
