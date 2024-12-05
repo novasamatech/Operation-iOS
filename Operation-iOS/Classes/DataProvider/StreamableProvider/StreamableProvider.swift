@@ -204,35 +204,39 @@ extension StreamableProvider: StreamableProviderProtocol {
                 return
             }
 
-            let operation: BaseOperation<[Model]>
+            let fetchOperation: BaseOperation<[Model]>
 
             if options.initialSize > 0 {
                 let sliceRequest = RepositorySliceRequest(offset: 0, count: options.initialSize,
                                                           reversed: false)
 
-                operation = self.repository.fetchOperation(by: sliceRequest)
+                fetchOperation = self.repository.fetchOperation(by: sliceRequest)
             } else {
-                operation = self.repository.fetchAllOperation()
+                fetchOperation = self.repository.fetchAllOperation()
             }
 
             let pending = DataProviderPendingObserver(observer: observer,
-                                                      operation: operation)
+                                                      operation: fetchOperation)
             self.pendingObservers.append(pending)
 
-            operation.completionBlock = {
-                self.processingQueue.async {
-                    self.completeAdd(observer: observer,
-                                     deliverOn: queue,
-                                     executing: updateBlock,
-                                     failing: failureBlock,
-                                     options: options)
+            let notificationOperation = ClosureOperation<Void> { [weak self] in
+                self?.processingQueue.async {
+                    self?.completeAdd(
+                        observer: observer,
+                        deliverOn: queue,
+                        executing: updateBlock,
+                        failing: failureBlock,
+                        options: options
+                    )
                 }
             }
+            
+            notificationOperation.addDependency(fetchOperation)
 
             if options.waitsInProgressSyncOnAdd {
-                self.operationManager.enqueue(operations: [operation], in: .sync)
+                self.operationManager.enqueue(operations: [fetchOperation, notificationOperation], in: .sync)
             } else {
-                self.operationManager.enqueue(operations: [operation], in: .transient)
+                self.operationManager.enqueue(operations: [fetchOperation, notificationOperation], in: .transient)
             }
         }
     }

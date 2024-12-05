@@ -185,25 +185,29 @@ extension DataProvider: DataProviderProtocol {
                                                       operation: repositoryOperation)
             self.pendingObservers.append(pending)
 
-            repositoryOperation.completionBlock = {
-                self.syncQueue.async {
-                    self.completeAdd(observer: observer,
-                                     deliverOn: queue,
-                                     executing: updateBlock,
-                                     failing: failureBlock,
-                                     options: options)
+            let addOperation = ClosureOperation<Void> { [weak self] in
+                self?.syncQueue.async {
+                    self?.completeAdd(
+                        observer: observer,
+                        deliverOn: queue,
+                        executing: updateBlock,
+                        failing: failureBlock,
+                        options: options
+                    )
                 }
             }
+            
+            addOperation.addDependency(repositoryOperation)
 
             if options.waitsInProgressSyncOnAdd {
                 if let syncOperation = self.lastSyncOperation, !syncOperation.isFinished {
                     repositoryOperation.addDependency(syncOperation)
                 }
 
-                self.lastSyncOperation = repositoryOperation
+                self.lastSyncOperation = addOperation
             }
 
-            self.executionQueue.addOperations([repositoryOperation], waitUntilFinished: false)
+            self.executionQueue.addOperations([repositoryOperation, addOperation], waitUntilFinished: false)
         }
     }
 

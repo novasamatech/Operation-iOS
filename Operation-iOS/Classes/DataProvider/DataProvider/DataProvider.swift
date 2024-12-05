@@ -101,14 +101,14 @@ extension DataProvider {
 
         let saveOperation = createSaveRepositoryOperation(dependingOn: differenceOperation)
 
-        saveOperation.completionBlock = {
+        let notificationOperation = ClosureOperation<Void> { [weak self] in
             guard let saveResult = saveOperation.result else {
                 return
             }
 
             if case .failure(let error) = saveResult {
-                self.syncQueue.async {
-                    self.notifyObservers(with: error)
+                self?.syncQueue.async {
+                    self?.notifyObservers(with: error)
                 }
 
                 return
@@ -119,21 +119,23 @@ extension DataProvider {
                     return
             }
 
-            self.syncQueue.async {
-                self.notifyObservers(with: updates)
+            self?.syncQueue.async {
+                self?.notifyObservers(with: updates)
             }
         }
-
-        repositoryUpdateOperation = saveOperation
+        
+        notificationOperation.addDependency(saveOperation)
+        
+        repositoryUpdateOperation = notificationOperation
 
         if let syncOperation = lastSyncOperation, !syncOperation.isFinished {
             sourceWrapper.allOperations.forEach { $0.addDependency(syncOperation) }
             repositoryOperation.addDependency(syncOperation)
         }
 
-        lastSyncOperation = saveOperation
+        lastSyncOperation = notificationOperation
 
-        let operations = sourceWrapper.allOperations + [repositoryOperation, differenceOperation, saveOperation]
+        let operations = sourceWrapper.allOperations + [repositoryOperation, differenceOperation, saveOperation, notificationOperation]
 
         executionQueue.addOperations(operations, waitUntilFinished: false)
     }

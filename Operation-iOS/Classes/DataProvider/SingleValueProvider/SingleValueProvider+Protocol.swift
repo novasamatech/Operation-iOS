@@ -127,25 +127,29 @@ extension SingleValueProvider: SingleValueProviderProtocol {
                                                       operation: repositoryOperation)
             self.pendingObservers.append(pending)
 
-            repositoryOperation.completionBlock = {
-                self.syncQueue.async {
-                    self.completeAdd(observer: observer,
-                                     deliverOn: queue,
-                                     executing: updateBlock,
-                                     failing: failureBlock,
-                                     options: options)
+            let notificationOperation = ClosureOperation { [weak self] in
+                self?.syncQueue.async {
+                    self?.completeAdd(
+                        observer: observer,
+                        deliverOn: queue,
+                        executing: updateBlock,
+                        failing: failureBlock,
+                        options: options
+                    )
                 }
             }
+            
+            notificationOperation.addDependency(repositoryOperation)
 
             if options.waitsInProgressSyncOnAdd {
                 if let syncOperation = self.lastSyncOperation, !syncOperation.isFinished {
                     repositoryOperation.addDependency(syncOperation)
                 }
 
-                self.lastSyncOperation = repositoryOperation
+                self.lastSyncOperation = notificationOperation
             }
 
-            self.executionQueue.addOperations([repositoryOperation], waitUntilFinished: false)
+            self.executionQueue.addOperations([repositoryOperation, notificationOperation], waitUntilFinished: false)
         }
     }
 
