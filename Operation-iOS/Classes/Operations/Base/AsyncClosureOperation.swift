@@ -17,7 +17,9 @@ open class AsyncClosureOperation<ResultType>: BaseOperation<ResultType> {
     }
 
     open override func cancel() {
-        cancelationClosure?()
+        if isExecuting {
+            cancelationClosure?()
+        }
         
         super.cancel()
     }

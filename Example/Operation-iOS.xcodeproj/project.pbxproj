@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		0C33E8B82D0103D60090096A /* OperationExecution.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C33E8B72D0103D60090096A /* OperationExecution.swift */; };
 		0C8B0F702B84C15500A2A53F /* Constants.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C8B0F322B84C15500A2A53F /* Constants.swift */; };
 		0C8B0F712B84C15500A2A53F /* DummyNetworkMock.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C8B0F342B84C15500A2A53F /* DummyNetworkMock.swift */; };
 		0C8B0F722B84C15500A2A53F /* emptyResponse.json in Resources */ = {isa = PBXBuildFile; fileRef = 0C8B0F352B84C15500A2A53F /* emptyResponse.json */; };
@@ -73,6 +74,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		0C33E8B72D0103D60090096A /* OperationExecution.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OperationExecution.swift; sourceTree = "<group>"; };
 		0C8B0F322B84C15500A2A53F /* Constants.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = Constants.swift; sourceTree = "<group>"; };
 		0C8B0F342B84C15500A2A53F /* DummyNetworkMock.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = DummyNetworkMock.swift; sourceTree = "<group>"; };
 		0C8B0F352B84C15500A2A53F /* emptyResponse.json */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.json; path = emptyResponse.json; sourceTree = "<group>"; };
@@ -312,6 +314,7 @@
 			children = (
 				0C8B0F6E2B84C15500A2A53F /* CompoundOperationWrapperTests.swift */,
 				0C8B0F6F2B84C15500A2A53F /* OperationManagerTests.swift */,
+				0C33E8B72D0103D60090096A /* OperationExecution.swift */,
 			);
 			name = Operation;
 			path = ../../Tests/Operation;
@@ -623,6 +626,7 @@
 				0C8B0F7B2B84C15500A2A53F /* Entities.xcdatamodeld in Sources */,
 				0C8B0F892B84C15500A2A53F /* CoreDataServiceTests.swift in Sources */,
 				0C8B0F9D2B84C15500A2A53F /* CompoundOperationWrapperTests.swift in Sources */,
+				0C33E8B82D0103D60090096A /* OperationExecution.swift in Sources */,
 				0C8B0F7A2B84C15500A2A53F /* CDProject+CoreDataDecodable.swift in Sources */,
 				0C8B0F862B84C15500A2A53F /* CoreDataOperationHelper.swift in Sources */,
 				0C8B0F902B84C15500A2A53F /* DataProviderInterfaceTests.swift in Sources */,
