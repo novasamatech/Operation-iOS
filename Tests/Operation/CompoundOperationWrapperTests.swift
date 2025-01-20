@@ -1,5 +1,8 @@
 import XCTest
-import Operation_iOS
+@testable import Operation_iOS
+#if SWIFT_PACKAGE
+import Helpers
+#endif
 
 class CompoundOperationWrapperTests: XCTestCase {
 

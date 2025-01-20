@@ -8,10 +8,18 @@ extension CoreDataServiceConfiguration {
                                           incompatibleModelStrategy: .ignore)
     }
 
-    public static func createDefaultConfigutation(with modelName: String,
-                                                  databaseName: String,
-                                                  incompatibleModelStrategy: IncompatibleModelHandlingStrategy) -> CoreDataServiceConfiguration {
-        let bundle = Bundle(for: LoadableBundleClass.self)
+    public static func createDefaultConfigutation(
+        with modelName: String,
+        databaseName: String,
+        incompatibleModelStrategy: IncompatibleModelHandlingStrategy
+    ) -> CoreDataServiceConfiguration {
+        let bundle: Bundle
+#if SWIFT_PACKAGE
+        bundle = Bundle.module
+#else
+        bundle = Bundle(for: LoadableBundleClass.self)
+#endif
+        
         let modelURL = bundle.url(forResource: modelName, withExtension: "momd")
         let databaseName = "\(databaseName).sqlite"
 

@@ -1,5 +1,8 @@
 import XCTest
 @testable import Operation_iOS
+#if SWIFT_PACKAGE
+import Helpers
+#endif
 
 class ListDifferenceCalculatorTests: XCTestCase {
     let sortBlock: (FeedData, FeedData) -> Bool = { (object1, object2) -> Bool in

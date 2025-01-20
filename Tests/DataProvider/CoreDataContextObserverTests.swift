@@ -1,6 +1,9 @@
 import XCTest
 import CoreData
 @testable import Operation_iOS
+#if SWIFT_PACKAGE
+import Helpers
+#endif
 
 class CoreDataContextObserverTests: XCTestCase {
     let repository: CoreDataRepository<FeedData, CDFeed> = {
