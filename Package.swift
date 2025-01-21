@@ -64,5 +64,6 @@ let package = Package(
                 .process("CoreData/Model/Entities.xcdatamodeld")
             ]
         )
-    ]
+    ],
+    swiftLanguageVersions: [.v5]
 )
