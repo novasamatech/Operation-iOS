@@ -1,5 +1,8 @@
 import XCTest
 import Operation_iOS
+#if SWIFT_PACKAGE
+import Helpers
+#endif
 
 class StreamableDataProviderInitTests: XCTestCase {
     let repository: CoreDataRepository<FeedData, CDFeed> = {

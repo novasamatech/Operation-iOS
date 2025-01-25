@@ -2,9 +2,9 @@ import Foundation
 import Operation_iOS
 import XCTest
 
-typealias OperationEnqueuClosure = ([Operation]) -> Void
+public typealias OperationEnqueuClosure = ([Operation]) -> Void
 
-func modifyRepository<T: Identifiable>(_ repository: AnyDataProviderRepository<T>,
+public func modifyRepository<T: Identifiable>(_ repository: AnyDataProviderRepository<T>,
                                        handler: XCTestCase,
                                        saving: @escaping () throws -> [T],
                                        deleting: @escaping () throws -> [String],
@@ -13,7 +13,7 @@ func modifyRepository<T: Identifiable>(_ repository: AnyDataProviderRepository<T
     try handleOperation(operation, handler: handler, enqueueClosure: enqueueClosure)
 }
 
-func deleteAllFromRepository<T: Identifiable>(_ repository: AnyDataProviderRepository<T>,
+public func deleteAllFromRepository<T: Identifiable>(_ repository: AnyDataProviderRepository<T>,
                                               handler: XCTestCase,
                                               enqueueClosure: OperationEnqueuClosure? = nil) throws {
     let operation = repository.deleteAllOperation()

@@ -2,22 +2,22 @@ import Foundation
 import Operation_iOS
 import CoreData
 
-func clear(databaseService: CoreDataServiceProtocol) throws {
+public func clear(databaseService: CoreDataServiceProtocol) throws {
     try databaseService.close()
     try databaseService.drop()
 }
 
-final class CoreDataRepositoryFacade {
-    static let shared = CoreDataRepositoryFacade()
+public final class CoreDataRepositoryFacade {
+    public static let shared = CoreDataRepositoryFacade()
 
-    let databaseService: CoreDataServiceProtocol
+    public let databaseService: CoreDataServiceProtocol
 
     private init() {
         let configuration = CoreDataServiceConfiguration.createDefaultConfigutation()
         databaseService = CoreDataService(configuration: configuration)
     }
 
-    func createCoreDataRepository<T, U>(filter: NSPredicate? = nil,
+    public func createCoreDataRepository<T, U>(filter: NSPredicate? = nil,
                                         sortDescriptors: [NSSortDescriptor] = []) -> CoreDataRepository<T, U>
         where T: Identifiable & Codable, U: NSManagedObject & CoreDataCodable  {
 
@@ -28,7 +28,7 @@ final class CoreDataRepositoryFacade {
                                       sortDescriptors: sortDescriptors)
     }
 
-    func clearDatabase() throws {
+    public func clearDatabase() throws {
         try clear(databaseService: databaseService)
     }
 }

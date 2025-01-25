@@ -1,7 +1,7 @@
 import Foundation
 
-struct MessageData: Equatable, Codable {
-    var identifier: String
-    var chat: ChatData
-    var text: String
+public struct MessageData: Equatable, Codable {
+    public var identifier: String
+    public var chat: ChatData
+    public var text: String
 }

@@ -1,6 +1,9 @@
 import XCTest
 import Operation_iOS
 import CoreData
+#if SWIFT_PACKAGE
+import Helpers
+#endif
 
 class CoreDataCompatibilityTests: XCTestCase {
     let defaultCoreDataService: CoreDataServiceProtocol = {

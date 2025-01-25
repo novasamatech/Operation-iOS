@@ -1,5 +1,8 @@
 import XCTest
 @testable import Operation_iOS
+#if SWIFT_PACKAGE
+import Helpers
+#endif
 
 class CoreDataServiceTests: XCTestCase {
     let databaseService: CoreDataService = {
