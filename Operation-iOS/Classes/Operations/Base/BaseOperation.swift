@@ -194,3 +194,5 @@ open class BaseOperation<ResultType>: Operation {
         isFinished = true
     }
 }
+
+extension BaseOperation: CancellableCall {}
