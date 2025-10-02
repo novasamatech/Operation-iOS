@@ -112,12 +112,7 @@ public final class AnyNetworkResultFactory<T>: NetworkResultFactoryProtocol {
                 return .failure(NetworkBaseError.unexpectedEmptyData)
             }
 
-            do {
-                let value = try processingBlock(documentData)
-                return .success(value)
-            } catch {
-                return .failure(error)
-            }
+            return Result { try processingBlock(documentData) }
         }
     }
 
