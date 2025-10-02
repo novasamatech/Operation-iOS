@@ -131,7 +131,7 @@ extension OperationCombiningService {
 
         let mappingOperation = ClosureOperation<T?> {
             let results = try loadingOperation.extractNoCancellableResultData()
-            return results.first
+            return results.first.flatMap { $0 }
         }
 
         mappingOperation.addDependency(loadingOperation)
