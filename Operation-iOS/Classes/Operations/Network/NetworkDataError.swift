@@ -45,7 +45,7 @@ public enum NetworkResponseError: Error {
 
     static func createFrom(statusCode: Int) -> NetworkResponseError? {
         switch statusCode {
-        case 200:
+        case 200...299:
             return nil
         case 400:
             return NetworkResponseError.invalidParameters
