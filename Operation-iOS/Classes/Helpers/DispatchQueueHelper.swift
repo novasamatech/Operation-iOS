@@ -17,3 +17,17 @@ public func dispatchInQueueWhenPossible(
         mutex?.unlock()
     }
 }
+
+public func callbackClosureIfProvided<T>(
+    _ closure: ((Result<T, Error>) -> Void)?,
+    queue: DispatchQueue?,
+    result: Result<T, Error>
+) {
+    guard let closure else {
+        return
+    }
+
+    dispatchInQueueWhenPossible(queue) {
+        closure(result)
+    }
+}
