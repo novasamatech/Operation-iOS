@@ -1,0 +1,14 @@
+{
+  "pins" : [
+    {
+      "identity" : "logger-ios",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/novasamatech/logger-ios",
+      "state" : {
+        "revision" : "cafece8626141b4430ddc8d5288d3444abd122de",
+        "version" : "0.0.1"
+      }
+    }
+  ],
+  "version" : 2
+}
