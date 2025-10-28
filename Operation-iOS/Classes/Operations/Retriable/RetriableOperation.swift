@@ -1,4 +1,5 @@
 import Foundation
+import SDKLogger
 
 public final class RetriableOperation<ResultType>: AsyncClosureOperation<ResultType>, @unchecked Sendable {
     public typealias OperationFactory = () -> CompoundOperationWrapper<ResultType>?
@@ -12,7 +13,7 @@ public final class RetriableOperation<ResultType>: AsyncClosureOperation<ResultT
         retryDelay: TimeInterval,
         retryCount: Int,
         operationQueue: OperationQueue,
-        logger: LoggerProtocol?
+        logger: SDKLoggerProtocol?
     ) {
         let worker = Worker(
             factory: factory,
@@ -45,7 +46,7 @@ private extension RetriableOperation {
         private let retryDelay: TimeInterval
         private let retryCount: Int
         private let operationQueue: OperationQueue
-        private let logger: LoggerProtocol?
+        private let logger: SDKLoggerProtocol?
         private let callStore = CancellableCallStore()
 
         private var currentRetryCount = 0
@@ -57,7 +58,7 @@ private extension RetriableOperation {
             retryDelay: TimeInterval,
             retryCount: Int,
             operationQueue: OperationQueue,
-            logger: LoggerProtocol?
+            logger: SDKLoggerProtocol?
         ) {
             self.factory = factory
             self.retryMatcher = retryMatcher

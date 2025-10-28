@@ -11,11 +11,17 @@ let package = Package(
         // Products define the executables and libraries a package produces, making them visible to other packages.
         .library(
             name: name,
-            targets: [name]),
+            targets: [name])
+    ],
+    dependencies: [
+        .package(url: "https://github.com/novasamatech/logger-ios", exact: "0.0.1")
     ],
     targets: [
         .target(
             name: name,
+            dependencies: [
+                .product(name: "SDKLogger", package: "logger-ios")
+            ],
             path: "Operation-iOS/Classes"
         ),
         .testTarget(
