@@ -16,6 +16,12 @@ final public class CoreDataContextObservable<T: Identifiable, U: NSManagedObject
     private(set) var predicate: (U) -> Bool
 
     private var observers: [RepositoryObserver<T>] = []
+    
+    // MARK: - Persistent History Tracking
+    
+    private var historyObserver: CoreDataHistoryObserver?
+    private let target: CoreDataHistoryTarget
+    private let userDefaults: UserDefaults
 
     /**
      *  Creates Core Data context observable object.
@@ -27,15 +33,23 @@ final public class CoreDataContextObservable<T: Identifiable, U: NSManagedObject
      *    - processingQueue: Serial queue for internal synchronization needs. By
      *    default parameter is ```nil``` which mean that new queue is created internally
      *    but the client can pass shared queue for optimization reasons.
+     *    - target: The target (app or extension) for history tracking.
+     *    - userDefaults: UserDefaults instance for storing history timestamp.
      */
 
-    public init(service: CoreDataServiceProtocol,
-                mapper: AnyCoreDataMapper<T, U>,
-                predicate: @escaping (U) -> Bool,
-                processingQueue: DispatchQueue? = nil) {
+    public init(
+        service: CoreDataServiceProtocol,
+        mapper: AnyCoreDataMapper<T, U>,
+        predicate: @escaping (U) -> Bool,
+        processingQueue: DispatchQueue? = nil,
+        target: CoreDataHistoryTarget = .mainApp,
+        userDefaults: UserDefaults = .standard
+    ) {
         self.service = service
         self.mapper = mapper
         self.predicate = predicate
+        self.target = target
+        self.userDefaults = userDefaults
 
         if let processingQueue = processingQueue {
             self.processingQueue = processingQueue
@@ -110,21 +124,48 @@ final public class CoreDataContextObservable<T: Identifiable, U: NSManagedObject
     }
 }
 
+// MARK: - CoreDataHistoryObserverDelegate
+
+extension CoreDataContextObservable: CoreDataHistoryObserverDelegate {
+    public func persistentHistoryObserver(
+        _ observer: CoreDataHistoryObserver,
+        didReceiveNotifications notifications: [Notification]
+    ) {
+        for notification in notifications {
+            didReceive(notification: notification)
+        }
+    }
+}
+
+// MARK: - DataProviderRepositoryObservable
+
 extension CoreDataContextObservable: DataProviderRepositoryObservable {
     public typealias Model = T
 
     public func start(completionBlock: @escaping (Error?) -> Void) {
         service.performAsync { [weak self] (optionalContext, optionalError) in
-            guard let strongSelf = self else {
+            guard let self else {
                 completionBlock(nil)
                 return
             }
 
             if let context = optionalContext {
-                NotificationCenter.default.addObserver(strongSelf,
-                                                       selector: #selector(strongSelf.didReceive(notification:)),
-                                                       name: Notification.Name.NSManagedObjectContextDidSave,
-                                                       object: context)
+                NotificationCenter.default.addObserver(
+                    self,
+                    selector: #selector(didReceive(notification:)),
+                    name: Notification.Name.NSManagedObjectContextDidSave,
+                    object: context
+                )
+                
+                // Cross-process history tracking
+                let historyObserver = CoreDataHistoryObserver(
+                    service: service,
+                    target: target,
+                    userDefaults: userDefaults
+                )
+                historyObserver.delegate = self
+                historyObserver.startObserving()
+                self.historyObserver = historyObserver
             }
 
             completionBlock(optionalError)
@@ -133,15 +174,20 @@ extension CoreDataContextObservable: DataProviderRepositoryObservable {
 
     public func stop(completionBlock: @escaping (Error?) -> Void) {
         service.performAsync { [weak self] (optionalContext, optionalError) in
-            guard let strongSelf = self else {
+            guard let self else {
                 completionBlock(nil)
                 return
             }
 
             if let context = optionalContext {
-                NotificationCenter.default.removeObserver(strongSelf,
-                                                          name: Notification.Name.NSManagedObjectContextDidSave,
-                                                          object: context)
+                NotificationCenter.default.removeObserver(
+                    self,
+                    name: Notification.Name.NSManagedObjectContextDidSave,
+                    object: context
+                )
+                
+                self.historyObserver?.stopObserving()
+                self.historyObserver = nil
             }
 
             completionBlock(optionalError)

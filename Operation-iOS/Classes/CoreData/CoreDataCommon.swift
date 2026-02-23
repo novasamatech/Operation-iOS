@@ -30,6 +30,12 @@ public struct CoreDataPersistentSettings {
 
     /// Flag that states whether to allow database backup to iCloud.
     public var excludeFromiCloudBackup: Bool
+    
+    /// Enable persistent history tracking for cross-process change notifications
+    public var enableHistoryTracking: Bool
+    
+    /// A target that writes adds a transaction for shared store
+    public var transactionAuthor: String?
 
     /**
      *  Creates Core Data persistent store settins.
@@ -41,16 +47,24 @@ public struct CoreDataPersistentSettings {
      *    incompatible persisten store.
      *    - excludeFromiCloudBackup: Flag that states whether to allow database
      *    backup to iCloud.
+     *    - enableHistoryTracking: Flag that states wheter to enable history tracking feature
+     *    to support cross-process change notifications.
+     *    - transactionAuthor: A target that writes adds a transaction for shared store
      */
 
     public init(databaseDirectory: URL,
                 databaseName: String,
                 incompatibleModelStrategy: IncompatibleModelHandlingStrategy = .ignore,
-                excludeFromiCloudBackup: Bool = true) {
+                excludeFromiCloudBackup: Bool = true,
+                enableHistoryTracking: Bool = false,
+                transactionAuthor: String? = nil
+    ) {
         self.databaseDirectory = databaseDirectory
         self.databaseName = databaseName
         self.incompatibleModelStrategy = incompatibleModelStrategy
         self.excludeFromiCloudBackup = excludeFromiCloudBackup
+        self.enableHistoryTracking = enableHistoryTracking
+        self.transactionAuthor = transactionAuthor
     }
 }
 

@@ -92,6 +92,10 @@ extension CoreDataService {
         let fileManager = FileManager.default
         let optionalDatabaseURL = self.databaseURL(with: fileManager)
         let storageType: String
+        
+        // Extract settings for history tracking configuration
+        var enableHistoryTracking = false
+        var transactionAuthor: String?
 
         guard let model = NSManagedObjectModel(contentsOf: configuration.modelURL) else {
             throw CoreDataServiceError.modelInitializationFailed
@@ -110,6 +114,8 @@ extension CoreDataService {
             }
 
             storageType = NSSQLiteStoreType
+            enableHistoryTracking = settings.enableHistoryTracking
+            transactionAuthor = settings.transactionAuthor
         case .inMemory:
             storageType = NSInMemoryStoreType
         }
@@ -118,12 +124,27 @@ extension CoreDataService {
 
         let context = NSManagedObjectContext(concurrencyType: .privateQueueConcurrencyType)
         context.persistentStoreCoordinator = coordinator
+        
+        // Configure context for history tracking
+        if let transactionAuthor {
+            context.transactionAuthor = transactionAuthor
+            context.name = transactionAuthor
+        }
+        
+        // Build store options for persistent history tracking
+        var storeOptions: [String: Any]?
+        if enableHistoryTracking {
+            storeOptions = [
+                NSPersistentHistoryTrackingKey: true,
+                NSPersistentStoreRemoteChangeNotificationPostOptionKey: true
+            ]
+        }
 
         try coordinator.addPersistentStore(
             ofType: storageType,
             configurationName: nil,
             at: optionalDatabaseURL,
-            options: nil
+            options: storeOptions
         )
 
         self.context = context

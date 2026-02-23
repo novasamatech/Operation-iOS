@@ -6,7 +6,7 @@ import PackageDescription
 let name = "Operation-iOS"
 let package = Package(
     name: name,
-    platforms: [.iOS(.v14)],
+    platforms: [.iOS(.v15)],
     products: [
         // Products define the executables and libraries a package produces, making them visible to other packages.
         .library(
