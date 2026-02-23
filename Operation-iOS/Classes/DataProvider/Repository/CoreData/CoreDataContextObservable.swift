@@ -122,6 +122,31 @@ final public class CoreDataContextObservable<T: Identifiable, U: NSManagedObject
             }
         }
     }
+    
+    func startHistoryTracking() {
+        processingQueue.async {
+            guard case let .persistent(settings) = self.service.configuration.storageType,
+                  settings.enableHistoryTracking
+            else { return }
+            
+            // Cross-process history tracking
+            let historyObserver = CoreDataHistoryObserver(
+                service: self.service,
+                target: self.target,
+                userDefaults: self.userDefaults
+            )
+            historyObserver.delegate = self
+            historyObserver.startObserving()
+            self.historyObserver = historyObserver
+        }
+    }
+    
+    func stopHistoryTracking() {
+        processingQueue.async {
+            self.historyObserver?.stopObserving()
+            self.historyObserver = nil
+        }
+    }
 }
 
 // MARK: - CoreDataHistoryObserverDelegate
@@ -156,20 +181,12 @@ extension CoreDataContextObservable: DataProviderRepositoryObservable {
                     name: Notification.Name.NSManagedObjectContextDidSave,
                     object: context
                 )
-                
-                // Cross-process history tracking
-                let historyObserver = CoreDataHistoryObserver(
-                    service: service,
-                    target: target,
-                    userDefaults: userDefaults
-                )
-                historyObserver.delegate = self
-                historyObserver.startObserving()
-                self.historyObserver = historyObserver
             }
 
             completionBlock(optionalError)
         }
+        
+        startHistoryTracking()
     }
 
     public func stop(completionBlock: @escaping (Error?) -> Void) {
@@ -185,13 +202,12 @@ extension CoreDataContextObservable: DataProviderRepositoryObservable {
                     name: Notification.Name.NSManagedObjectContextDidSave,
                     object: context
                 )
-                
-                self.historyObserver?.stopObserving()
-                self.historyObserver = nil
             }
 
             completionBlock(optionalError)
         }
+        
+        stopHistoryTracking()
     }
 
     public func addObserver(_ observer: AnyObject,
