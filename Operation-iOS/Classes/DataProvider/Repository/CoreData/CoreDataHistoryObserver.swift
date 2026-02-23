@@ -80,12 +80,13 @@ public final class CoreDataHistoryObserver {
         service.performAsync { [weak self] context, _ in
             guard let self, let context else { return }
             
-            try? context.performAndWait {
+            context.performAndWait {
                 let fromDate = self.timestampManager.lastTimestamp ?? .distantPast
                 
-                let transactions = try self.fetcher.fetch(context: context, fromDate: fromDate)
-                
-                guard !transactions.isEmpty else { return }
+                guard
+                    let transactions = try? self.fetcher.fetch(context: context, fromDate: fromDate),
+                    !transactions.isEmpty
+                else { return }
                 
                 let notifications = self.merger.merge(context: context, transactions: transactions)
                 
@@ -97,7 +98,7 @@ public final class CoreDataHistoryObserver {
                     self.delegate?.persistentHistoryObserver(self, didReceiveNotifications: notifications)
                 }
                 
-                try self.cleaner.clean(context: context)
+                try? self.cleaner.clean(context: context)
             }
         }
     }
