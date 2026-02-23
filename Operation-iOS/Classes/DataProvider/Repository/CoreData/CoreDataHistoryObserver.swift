@@ -1,9 +1,6 @@
 import Foundation
 import CoreData
-
-/**
- *  Protocol for receiving persistent history change notifications.
- */
+import UIKit
 
 public protocol CoreDataHistoryObserverDelegate: AnyObject {
     func persistentHistoryObserver(
@@ -12,14 +9,11 @@ public protocol CoreDataHistoryObserverDelegate: AnyObject {
     )
 }
 
-/**
- *  Observes persistent store remote changes and coordinates fetching, merging, and cleanup.
- */
-
 public final class CoreDataHistoryObserver {
     private let service: CoreDataServiceProtocol
     private let target: CoreDataHistoryTarget
     private let userDefaults: UserDefaults
+
     private let fetcher: CoreDataHistoryFetching
     private let merger: CoreDataHistoryMerging
     private let cleaner: CoreDataHistoryCleaning
@@ -50,7 +44,7 @@ public final class CoreDataHistoryObserver {
     public func startObserving() {
         service.performAsync { [weak self] context, _ in
             guard let self, let context else { return }
-            
+
             if let coordinator = context.persistentStoreCoordinator {
                 NotificationCenter.default.addObserver(
                     self,
@@ -59,9 +53,13 @@ public final class CoreDataHistoryObserver {
                     object: coordinator
                 )
             }
+
+            self.processPendingHistory()
         }
+        
+        startObservingAppState()
     }
-    
+
     public func stopObserving() {
         service.performAsync { [weak self] context, _ in
             guard let self, let context else { return }
@@ -74,32 +72,59 @@ public final class CoreDataHistoryObserver {
                 )
             }
         }
+        
+        stopObservingAppState()
+    }
+}
+
+private extension CoreDataHistoryObserver {
+    @objc func didReceiveRemoteChange(notification: Notification) {
+        processPendingHistory()
     }
     
-    @objc private func didReceiveRemoteChange(notification: Notification) {
+    @objc func didBecomeActive() {
+        processPendingHistory()
+    }
+
+    func startObservingAppState() {
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(didBecomeActive),
+            name: UIApplication.didBecomeActiveNotification,
+            object: nil
+        )
+    }
+
+    func stopObservingAppState() {
+        NotificationCenter.default.removeObserver(
+            self,
+            name: UIApplication.didBecomeActiveNotification,
+            object: nil
+        )
+    }
+    
+    func processPendingHistory() {
         service.performAsync { [weak self] context, _ in
             guard let self, let context else { return }
             
-            context.performAndWait {
-                let fromDate = self.timestampManager.lastTimestamp ?? .distantPast
-                
-                guard
-                    let transactions = try? self.fetcher.fetch(context: context, fromDate: fromDate),
-                    !transactions.isEmpty
-                else { return }
-                
-                let notifications = self.merger.merge(context: context, transactions: transactions)
-                
-                if let lastTimestamp = transactions.last?.timestamp {
-                    self.timestampManager.update(to: lastTimestamp)
-                }
-                
-                if !notifications.isEmpty {
-                    self.delegate?.persistentHistoryObserver(self, didReceiveNotifications: notifications)
-                }
-                
-                try? self.cleaner.clean(context: context)
+            let fromDate = self.timestampManager.lastTimestamp ?? .distantPast
+            
+            guard
+                let transactions = try? self.fetcher.fetch(context: context, fromDate: fromDate),
+                !transactions.isEmpty
+            else { return }
+            
+            let notifications = self.merger.merge(context: context, transactions: transactions)
+            
+            if let lastTimestamp = transactions.last?.timestamp {
+                self.timestampManager.update(to: lastTimestamp)
             }
+            
+            if !notifications.isEmpty {
+                self.delegate?.persistentHistoryObserver(self, didReceiveNotifications: notifications)
+            }
+            
+            try? self.cleaner.clean(context: context)
         }
     }
 }
