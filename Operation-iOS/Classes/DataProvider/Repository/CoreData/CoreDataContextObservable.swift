@@ -17,8 +17,8 @@ final public class CoreDataContextObservable<T: Identifiable, U: NSManagedObject
 
     private var observers: [RepositoryObserver<T>] = []
     
-    // MARK: - Persistent History Tracking
-    
+    // Persistent History Tracking
+
     private var historyObserver: CoreDataHistoryObserver?
     private let target: CoreDataHistoryTarget
     private let userDefaults: UserDefaults
