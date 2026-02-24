@@ -42,8 +42,8 @@ public struct CoreDataHistoryMerger: CoreDataHistoryMerging {
     public func merge(context: NSManagedObjectContext, transactions: [NSPersistentHistoryTransaction]) -> [Notification] {
         var notifications: [Notification] = []
         
-        for transaction in transactions {
-            guard let userInfo = transaction.objectIDNotification().userInfo else { continue }
+        transactions.forEach { transaction in
+            guard let userInfo = transaction.objectIDNotification().userInfo else { return }
             
             NSManagedObjectContext.mergeChanges(fromRemoteContextSave: userInfo, into: [context])
             notifications.append(transaction.objectIDNotification())
