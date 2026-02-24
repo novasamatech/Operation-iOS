@@ -128,8 +128,7 @@ final public class CoreDataContextObservable<T: Identifiable, U: NSManagedObject
             guard case let .persistent(settings) = self.service.configuration.storageType,
                   settings.enableHistoryTracking
             else { return }
-            
-            // Cross-process history tracking
+
             let historyObserver = CoreDataHistoryObserver(
                 service: self.service,
                 target: self.target,
