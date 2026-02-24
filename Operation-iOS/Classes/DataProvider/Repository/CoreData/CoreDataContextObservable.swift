@@ -155,9 +155,7 @@ extension CoreDataContextObservable: CoreDataHistoryObserverDelegate {
         _ observer: CoreDataHistoryObserver,
         didReceiveNotifications notifications: [Notification]
     ) {
-        for notification in notifications {
-            didReceive(notification: notification)
-        }
+        notifications.forEach { didReceive(notification: $0) }
     }
 }
 
