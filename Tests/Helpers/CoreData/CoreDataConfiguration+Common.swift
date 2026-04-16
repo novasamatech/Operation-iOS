@@ -40,7 +40,9 @@ extension CoreDataServiceConfiguration {
         with modelName: String = Constants.defaultCoreDataModelName,
         databaseName: String,
         incompatibleModelStrategy: IncompatibleModelHandlingStrategy = .removeStore,
-        transactionAuthor: String = "test"
+        transactionAuthor: String = "test",
+        targets: [String] = [],
+        sharedContainerName: String = "test"
     ) -> CoreDataServiceConfiguration {
         let bundle: Bundle
 #if SWIFT_PACKAGE
@@ -48,20 +50,24 @@ extension CoreDataServiceConfiguration {
 #else
         bundle = Bundle(for: LoadableBundleClass.self)
 #endif
-        
+
         let modelURL = bundle.url(forResource: modelName, withExtension: "momd")
         let databaseName = "\(databaseName).sqlite"
 
         let baseURL = FileManager.default.urls(for: .documentDirectory,
                                                in: .userDomainMask).first?.appendingPathComponent("CoreData")
 
+        let historyTracking = CoreDataHistoryTrackingSettings(
+            transactionAuthor: transactionAuthor,
+            targets: targets,
+            sharedContainerName: sharedContainerName
+        )
+
         let persistentSettings = CoreDataPersistentSettings(
             databaseDirectory: baseURL!,
             databaseName: databaseName,
             incompatibleModelStrategy: incompatibleModelStrategy,
-            excludeFromiCloudBackup: true,
-            enableHistoryTracking: true,
-            transactionAuthor: transactionAuthor
+            historyTracking: historyTracking
         )
 
         let configuration = CoreDataServiceConfiguration(modelURL: modelURL!,

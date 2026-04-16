@@ -6,341 +6,177 @@ import Helpers
 #endif
 
 final class CoreDataHistoryObserverTests: XCTestCase {
-    
-    private var userDefaults: UserDefaults!
+
     private var databaseService: CoreDataServiceProtocol!
-    
+    private var repository: CoreDataRepository<FeedData, CDFeed>!
+    private let operationQueue = OperationQueue()
+
     override func setUp() {
         super.setUp()
-        
-        userDefaults = UserDefaults(suiteName: "CoreDataHistoryObserverTests")!
-        userDefaults.removePersistentDomain(forName: "CoreDataHistoryObserverTests")
-        
+
         let configuration = CoreDataServiceConfiguration.createConfigurationWithHistoryTracking(
             databaseName: "HistoryObserverTests"
         )
         databaseService = CoreDataService(configuration: configuration)
+
+        let sortDescriptor = NSSortDescriptor(key: FeedData.CodingKeys.name.rawValue, ascending: false)
+        let mapper = AnyCoreDataMapper(CodableCoreDataMapper<FeedData, CDFeed>())
+        repository = CoreDataRepository(
+            databaseService: databaseService,
+            mapper: mapper,
+            filter: nil,
+            sortDescriptors: [sortDescriptor]
+        )
     }
-    
+
     override func tearDown() {
-        userDefaults.removePersistentDomain(forName: "CoreDataHistoryObserverTests")
-        userDefaults = nil
-        
         try? databaseService.close()
         try? databaseService.drop()
         databaseService = nil
-        
+        repository = nil
+
         super.tearDown()
     }
-    
+
     // MARK: - Tests
-    
-    func testObserverCallsFetcherOnRemoteChange() {
-        // given
-        let mockFetcher = MockHistoryFetcher()
-        let mockMerger = MockHistoryMerger()
-        let mockCleaner = MockHistoryCleaner()
-        
-        let observer = CoreDataHistoryObserver(
-            service: databaseService,
-            target: .mainApp,
-            userDefaults: userDefaults,
-            fetcher: mockFetcher,
-            merger: mockMerger,
-            cleaner: mockCleaner
+
+    func testObserverProcessesRemoteChanges() {
+        // given - create a second service with a different author but same database
+        let otherAuthorConfig = CoreDataServiceConfiguration.createConfigurationWithHistoryTracking(
+            databaseName: "HistoryObserverTests",
+            transactionAuthor: "other_process"
         )
-        
-        let startExpectation = XCTestExpectation(description: "Observer started")
-        let fetchExpectation = XCTestExpectation(description: "Fetcher called")
-        
-        mockFetcher.onFetchCalled = {
-            fetchExpectation.fulfill()
-        }
-        
-        observer.startObserving()
-        
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-            startExpectation.fulfill()
-        }
-        
-        wait(for: [startExpectation], timeout: Constants.expectationDuration)
-        
-        // when - trigger remote change
-        databaseService.performAsync { context, _ in
-            guard let coordinator = context?.persistentStoreCoordinator else { return }
-            NotificationCenter.default.post(
-                name: .NSPersistentStoreRemoteChange,
-                object: coordinator
-            )
-        }
-        
-        // then
-        wait(for: [fetchExpectation], timeout: Constants.expectationDuration)
-        XCTAssertTrue(mockFetcher.fetchCalled, "Fetcher should be called on remote change")
-        
-        observer.stopObserving()
-    }
-    
-    func testObserverCallsMergerWhenTransactionsExist() {
-        // given
-        let mockFetcher = MockHistoryFetcher()
-        let mockMerger = MockHistoryMerger()
-        let mockCleaner = MockHistoryCleaner()
-        
-        // Simulate fetcher returning transactions
-        mockFetcher.transactionsToReturn = [MockPersistentHistoryTransaction()]
-        
-        let observer = CoreDataHistoryObserver(
-            service: databaseService,
-            target: .mainApp,
-            userDefaults: userDefaults,
-            fetcher: mockFetcher,
-            merger: mockMerger,
-            cleaner: mockCleaner
+        let otherAuthorService = CoreDataService(configuration: otherAuthorConfig)
+
+        let sortDescriptor = NSSortDescriptor(key: FeedData.CodingKeys.name.rawValue, ascending: false)
+        let mapper = AnyCoreDataMapper(CodableCoreDataMapper<FeedData, CDFeed>())
+        let otherRepository = CoreDataRepository<FeedData, CDFeed>(
+            databaseService: otherAuthorService,
+            mapper: mapper,
+            filter: nil,
+            sortDescriptors: [sortDescriptor]
         )
-        
-        let startExpectation = XCTestExpectation(description: "Observer started")
-        let mergeExpectation = XCTestExpectation(description: "Merger called")
-        
-        mockMerger.onMergeCalled = {
-            mergeExpectation.fulfill()
+
+        let didSaveExpectation = XCTestExpectation(description: "didSave notification posted")
+        let saveExpectation = XCTestExpectation(description: "Save data from other author")
+        let contextExpectation = XCTestExpectation(description: "Context ready")
+
+        // when - set up observer on main service context, then insert data from other author
+        databaseService.performAsync { context, error in
+            guard let context else {
+                XCTFail("Failed to get context: \(String(describing: error))")
+                contextExpectation.fulfill()
+                return
+            }
+
+            // Listen for didSave notifications that the observer re-posts after merging
+            NotificationCenter.default.addObserver(
+                forName: .NSManagedObjectContextDidSave,
+                object: context,
+                queue: nil
+            ) { _ in
+                didSaveExpectation.fulfill()
+            }
+
+            contextExpectation.fulfill()
         }
-        
-        observer.startObserving()
-        
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-            startExpectation.fulfill()
-        }
-        
-        wait(for: [startExpectation], timeout: Constants.expectationDuration)
-        
-        // when
-        databaseService.performAsync { context, _ in
-            guard let coordinator = context?.persistentStoreCoordinator else { return }
-            NotificationCenter.default.post(
-                name: .NSPersistentStoreRemoteChange,
-                object: coordinator
-            )
-        }
-        
-        // then
-        wait(for: [mergeExpectation], timeout: Constants.expectationDuration)
-        XCTAssertTrue(mockMerger.mergeCalled, "Merger should be called when transactions exist")
-        
-        observer.stopObserving()
+
+        wait(for: [contextExpectation], timeout: Constants.expectationDuration)
+
+        // Insert data from a different author to trigger remote change
+        let feeds = (0..<3).map { _ in createRandomFeed(in: .default) }
+        let operation = otherRepository.saveOperation({ feeds }, { [] })
+        operation.completionBlock = { saveExpectation.fulfill() }
+        operationQueue.addOperation(operation)
+
+        wait(for: [saveExpectation], timeout: Constants.expectationDuration)
+
+        // then - observer should process the remote change and re-post as didSave
+        wait(for: [didSaveExpectation], timeout: Constants.expectationDuration)
+
+        // Cleanup
+        try? otherAuthorService.close()
     }
-    
-    func testObserverDoesNotCallMergerWhenNoTransactions() {
+
+    func testObserverUpdatesTimestampAfterProcessing() {
         // given
-        let mockFetcher = MockHistoryFetcher()
-        let mockMerger = MockHistoryMerger()
-        let mockCleaner = MockHistoryCleaner()
-        
-        // Fetcher returns empty array
-        mockFetcher.transactionsToReturn = []
-        
-        let observer = CoreDataHistoryObserver(
-            service: databaseService,
-            target: .mainApp,
-            userDefaults: userDefaults,
-            fetcher: mockFetcher,
-            merger: mockMerger,
-            cleaner: mockCleaner
+        let sharedSuiteName = "HistoryObserverTimestampTests"
+        let sharedDefaults = UserDefaults(suiteName: sharedSuiteName)!
+        sharedDefaults.removePersistentDomain(forName: sharedSuiteName)
+
+        let transactionAuthor = "timestamp_test_target"
+
+        let configuration = CoreDataServiceConfiguration.createConfigurationWithHistoryTracking(
+            databaseName: "HistoryObserverTimestampTests",
+            transactionAuthor: transactionAuthor,
+            sharedContainerName: sharedSuiteName
         )
-        
-        let startExpectation = XCTestExpectation(description: "Observer started")
-        let fetchExpectation = XCTestExpectation(description: "Fetcher called")
-        
-        mockFetcher.onFetchCalled = {
-            fetchExpectation.fulfill()
-        }
-        
-        observer.startObserving()
-        
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-            startExpectation.fulfill()
-        }
-        
-        wait(for: [startExpectation], timeout: Constants.expectationDuration)
-        
-        // when
-        databaseService.performAsync { context, _ in
-            guard let coordinator = context?.persistentStoreCoordinator else { return }
-            NotificationCenter.default.post(
-                name: .NSPersistentStoreRemoteChange,
-                object: coordinator
-            )
-        }
-        
-        wait(for: [fetchExpectation], timeout: Constants.expectationDuration)
-        
-        // Allow time for merger to be called (if it would be)
-        let waitExpectation = XCTestExpectation(description: "Wait")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            waitExpectation.fulfill()
-        }
-        wait(for: [waitExpectation], timeout: Constants.expectationDuration)
-        
-        // then
-        XCTAssertFalse(mockMerger.mergeCalled, "Merger should not be called when no transactions")
-        
-        observer.stopObserving()
-    }
-    
-    func testObserverCallsCleanerAfterMerging() {
-        // given
-        let mockFetcher = MockHistoryFetcher()
-        let mockMerger = MockHistoryMerger()
-        let mockCleaner = MockHistoryCleaner()
-        
-        mockFetcher.transactionsToReturn = [MockPersistentHistoryTransaction()]
-        
-        let observer = CoreDataHistoryObserver(
-            service: databaseService,
-            target: .mainApp,
-            userDefaults: userDefaults,
-            fetcher: mockFetcher,
-            merger: mockMerger,
-            cleaner: mockCleaner
+        let service = CoreDataService(configuration: configuration)
+
+        let sortDescriptor = NSSortDescriptor(key: FeedData.CodingKeys.name.rawValue, ascending: false)
+        let mapper = AnyCoreDataMapper(CodableCoreDataMapper<FeedData, CDFeed>())
+
+        let otherAuthorConfig = CoreDataServiceConfiguration.createConfigurationWithHistoryTracking(
+            databaseName: "HistoryObserverTimestampTests",
+            transactionAuthor: "other_process"
         )
-        
-        let startExpectation = XCTestExpectation(description: "Observer started")
-        let cleanExpectation = XCTestExpectation(description: "Cleaner called")
-        
-        mockCleaner.onCleanCalled = {
-            cleanExpectation.fulfill()
-        }
-        
-        observer.startObserving()
-        
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-            startExpectation.fulfill()
-        }
-        
-        wait(for: [startExpectation], timeout: Constants.expectationDuration)
-        
-        // when
-        databaseService.performAsync { context, _ in
-            guard let coordinator = context?.persistentStoreCoordinator else { return }
-            NotificationCenter.default.post(
-                name: .NSPersistentStoreRemoteChange,
-                object: coordinator
-            )
-        }
-        
-        // then
-        wait(for: [cleanExpectation], timeout: Constants.expectationDuration)
-        XCTAssertTrue(mockCleaner.cleanCalled, "Cleaner should be called after merging")
-        
-        observer.stopObserving()
-    }
-    
-    func testObserverNotifiesDelegateWithMergedNotifications() {
-        // given
-        let mockFetcher = MockHistoryFetcher()
-        let mockMerger = MockHistoryMerger()
-        let mockCleaner = MockHistoryCleaner()
-        let mockDelegate = MockHistoryObserverDelegate()
-        
-        mockFetcher.transactionsToReturn = [MockPersistentHistoryTransaction()]
-        
-        let testNotification = Notification(name: .NSManagedObjectContextDidSave)
-        mockMerger.notificationsToReturn = [testNotification]
-        
-        let observer = CoreDataHistoryObserver(
-            service: databaseService,
-            target: .mainApp,
-            userDefaults: userDefaults,
-            fetcher: mockFetcher,
-            merger: mockMerger,
-            cleaner: mockCleaner
+        let otherAuthorService = CoreDataService(configuration: otherAuthorConfig)
+        let otherRepository = CoreDataRepository<FeedData, CDFeed>(
+            databaseService: otherAuthorService,
+            mapper: mapper,
+            filter: nil,
+            sortDescriptors: [sortDescriptor]
         )
-        observer.delegate = mockDelegate
-        
-        let startExpectation = XCTestExpectation(description: "Observer started")
-        let delegateExpectation = XCTestExpectation(description: "Delegate called")
-        
-        mockDelegate.onNotificationsReceived = {
-            delegateExpectation.fulfill()
+
+        let timestampManager = CoreDataHistoryTimestampManager(
+            target: transactionAuthor,
+            userDefaults: sharedDefaults
+        )
+
+        // Verify no timestamp initially
+        XCTAssertNil(timestampManager.lastTimestamp)
+
+        let contextExpectation = XCTestExpectation(description: "Context ready")
+        let saveExpectation = XCTestExpectation(description: "Save data")
+        let processExpectation = XCTestExpectation(description: "History processed")
+
+        // when - trigger service setup (creates internal observer), then insert remote data
+        service.performAsync { context, error in
+            guard let context else {
+                XCTFail("Failed to get context: \(String(describing: error))")
+                contextExpectation.fulfill()
+                return
+            }
+
+            NotificationCenter.default.addObserver(
+                forName: .NSManagedObjectContextDidSave,
+                object: context,
+                queue: nil
+            ) { _ in
+                processExpectation.fulfill()
+            }
+
+            contextExpectation.fulfill()
         }
-        
-        observer.startObserving()
-        
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-            startExpectation.fulfill()
-        }
-        
-        wait(for: [startExpectation], timeout: Constants.expectationDuration)
-        
-        // when
-        databaseService.performAsync { context, _ in
-            guard let coordinator = context?.persistentStoreCoordinator else { return }
-            NotificationCenter.default.post(
-                name: .NSPersistentStoreRemoteChange,
-                object: coordinator
-            )
-        }
-        
-        // then
-        wait(for: [delegateExpectation], timeout: Constants.expectationDuration)
-        XCTAssertEqual(mockDelegate.receivedNotifications.count, 1)
-        XCTAssertEqual(mockDelegate.receivedNotifications.first?.count, 1)
-        
-        observer.stopObserving()
+
+        wait(for: [contextExpectation], timeout: Constants.expectationDuration)
+
+        // Insert data from another author
+        let feeds = (0..<2).map { _ in createRandomFeed(in: .default) }
+        let operation = otherRepository.saveOperation({ feeds }, { [] })
+        operation.completionBlock = { saveExpectation.fulfill() }
+        operationQueue.addOperation(operation)
+
+        wait(for: [saveExpectation], timeout: Constants.expectationDuration)
+        wait(for: [processExpectation], timeout: Constants.expectationDuration)
+
+        // then - service's internal observer should have updated the timestamp
+        XCTAssertNotNil(timestampManager.lastTimestamp, "Timestamp should be set after processing history")
+
+        // Cleanup
+        sharedDefaults.removePersistentDomain(forName: sharedSuiteName)
+        try? otherAuthorService.close()
+        try? service.close()
+        try? service.drop()
     }
 }
-
-// MARK: - Mocks
-
-private final class MockHistoryFetcher: CoreDataHistoryFetching {
-    var fetchCalled = false
-    var transactionsToReturn: [NSPersistentHistoryTransaction] = []
-    var onFetchCalled: (() -> Void)?
-    
-    func fetch(context: NSManagedObjectContext, fromDate: Date) throws -> [NSPersistentHistoryTransaction] {
-        fetchCalled = true
-        onFetchCalled?()
-        return transactionsToReturn
-    }
-}
-
-private final class MockHistoryMerger: CoreDataHistoryMerging {
-    var mergeCalled = false
-    var notificationsToReturn: [Notification] = []
-    var onMergeCalled: (() -> Void)?
-    
-    func merge(context: NSManagedObjectContext, transactions: [NSPersistentHistoryTransaction]) -> [Notification] {
-        mergeCalled = true
-        onMergeCalled?()
-        return notificationsToReturn
-    }
-}
-
-private final class MockHistoryCleaner: CoreDataHistoryCleaning {
-    var cleanCalled = false
-    var onCleanCalled: (() -> Void)?
-    
-    func clean(context: NSManagedObjectContext) throws {
-        cleanCalled = true
-        onCleanCalled?()
-    }
-}
-
-private final class MockHistoryObserverDelegate: CoreDataHistoryObserverDelegate {
-    var receivedNotifications: [[Notification]] = []
-    var onNotificationsReceived: (() -> Void)?
-    
-    func persistentHistoryObserver(
-        _ observer: CoreDataHistoryObserver,
-        didReceiveNotifications notifications: [Notification]
-    ) {
-        receivedNotifications.append(notifications)
-        onNotificationsReceived?()
-    }
-}
-private final class MockPersistentHistoryTransaction: NSPersistentHistoryTransaction {
-    override var timestamp: Date {
-        Date()
-    }
-}
-

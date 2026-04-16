@@ -16,12 +16,6 @@ final public class CoreDataContextObservable<T: Identifiable, U: NSManagedObject
     private(set) var predicate: (U) -> Bool
 
     private var observers: [RepositoryObserver<T>] = []
-    
-    // Persistent History Tracking
-
-    private var historyObserver: CoreDataHistoryObserver?
-    private let target: CoreDataHistoryTarget
-    private let userDefaults: UserDefaults
 
     /**
      *  Creates Core Data context observable object.
@@ -33,23 +27,17 @@ final public class CoreDataContextObservable<T: Identifiable, U: NSManagedObject
      *    - processingQueue: Serial queue for internal synchronization needs. By
      *    default parameter is ```nil``` which mean that new queue is created internally
      *    but the client can pass shared queue for optimization reasons.
-     *    - target: The target (app or extension) for history tracking.
-     *    - userDefaults: UserDefaults instance for storing history timestamp.
      */
 
     public init(
         service: CoreDataServiceProtocol,
         mapper: AnyCoreDataMapper<T, U>,
         predicate: @escaping (U) -> Bool,
-        processingQueue: DispatchQueue? = nil,
-        target: CoreDataHistoryTarget = .mainApp,
-        userDefaults: UserDefaults = .standard
+        processingQueue: DispatchQueue? = nil
     ) {
         self.service = service
         self.mapper = mapper
         self.predicate = predicate
-        self.target = target
-        self.userDefaults = userDefaults
 
         if let processingQueue = processingQueue {
             self.processingQueue = processingQueue
@@ -122,41 +110,6 @@ final public class CoreDataContextObservable<T: Identifiable, U: NSManagedObject
             }
         }
     }
-    
-    func startHistoryTracking() {
-        processingQueue.async {
-            guard case let .persistent(settings) = self.service.configuration.storageType,
-                  settings.enableHistoryTracking
-            else { return }
-
-            let historyObserver = CoreDataHistoryObserver(
-                service: self.service,
-                target: self.target,
-                userDefaults: self.userDefaults
-            )
-            historyObserver.delegate = self
-            historyObserver.startObserving()
-            self.historyObserver = historyObserver
-        }
-    }
-    
-    func stopHistoryTracking() {
-        processingQueue.async {
-            self.historyObserver?.stopObserving()
-            self.historyObserver = nil
-        }
-    }
-}
-
-// MARK: - CoreDataHistoryObserverDelegate
-
-extension CoreDataContextObservable: CoreDataHistoryObserverDelegate {
-    public func persistentHistoryObserver(
-        _ observer: CoreDataHistoryObserver,
-        didReceiveNotifications notifications: [Notification]
-    ) {
-        notifications.forEach { didReceive(notification: $0) }
-    }
 }
 
 // MARK: - DataProviderRepositoryObservable
@@ -182,8 +135,6 @@ extension CoreDataContextObservable: DataProviderRepositoryObservable {
 
             completionBlock(optionalError)
         }
-        
-        startHistoryTracking()
     }
 
     public func stop(completionBlock: @escaping (Error?) -> Void) {
@@ -203,8 +154,6 @@ extension CoreDataContextObservable: DataProviderRepositoryObservable {
 
             completionBlock(optionalError)
         }
-        
-        stopHistoryTracking()
     }
 
     public func addObserver(_ observer: AnyObject,

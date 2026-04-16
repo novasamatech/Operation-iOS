@@ -46,7 +46,7 @@ final class CoreDataHistoryCleanerTests: XCTestCase {
             }
             
             let cleaner = CoreDataHistoryCleaner(
-                targets: CoreDataHistoryTarget.allCases,
+                targets: [CoreDataHistoryTarget.mainApp, "notification-extension"],
                 userDefaults: self.userDefaults
             )
             
@@ -65,7 +65,7 @@ final class CoreDataHistoryCleanerTests: XCTestCase {
     
     func testCleanDoesNothingWhenOnlyOneTargetHasTimestamp() {
         // given
-        let mainAppManager = CoreDataHistoryTimestampManager(target: .mainApp, userDefaults: userDefaults)
+        let mainAppManager = CoreDataHistoryTimestampManager(target: CoreDataHistoryTarget.mainApp, userDefaults: userDefaults)
         mainAppManager.update(to: Date())
         
         let expectation = XCTestExpectation()
@@ -78,7 +78,7 @@ final class CoreDataHistoryCleanerTests: XCTestCase {
             }
             
             let cleaner = CoreDataHistoryCleaner(
-                targets: CoreDataHistoryTarget.allCases,
+                targets: [CoreDataHistoryTarget.mainApp, "notification-extension"],
                 userDefaults: self.userDefaults
             )
             
@@ -101,8 +101,8 @@ final class CoreDataHistoryCleanerTests: XCTestCase {
         // given - set timestamps for all targets
         let cleanupDate = Date()
         
-        let mainAppManager = CoreDataHistoryTimestampManager(target: .mainApp, userDefaults: userDefaults)
-        let extensionManager = CoreDataHistoryTimestampManager(target: .notificationExtension, userDefaults: userDefaults)
+        let mainAppManager = CoreDataHistoryTimestampManager(target: CoreDataHistoryTarget.mainApp, userDefaults: userDefaults)
+        let extensionManager = CoreDataHistoryTimestampManager(target: "notification-extension", userDefaults: userDefaults)
         
         mainAppManager.update(to: cleanupDate)
         extensionManager.update(to: cleanupDate.addingTimeInterval(10)) // Extension processed slightly later
@@ -117,17 +117,18 @@ final class CoreDataHistoryCleanerTests: XCTestCase {
             }
             
             let cleaner = CoreDataHistoryCleaner(
-                targets: CoreDataHistoryTarget.allCases,
+                targets: [CoreDataHistoryTarget.mainApp, "notification-extension"],
                 userDefaults: self.userDefaults
             )
             
             // when
             do {
                 try cleaner.clean(context: context)
-                
-                // then - timestamps should be cleared after successful cleanup
-                XCTAssertNil(mainAppManager.lastTimestamp, "Main app timestamp should be cleared after cleanup")
-                XCTAssertNil(extensionManager.lastTimestamp, "Extension timestamp should be cleared after cleanup")
+
+                // then - timestamps should be preserved after cleanup
+                // (they represent "how far processed", not "how far cleaned")
+                XCTAssertNotNil(mainAppManager.lastTimestamp, "Main app timestamp should be preserved after cleanup")
+                XCTAssertNotNil(extensionManager.lastTimestamp, "Extension timestamp should be preserved after cleanup")
                 expectation.fulfill()
             } catch {
                 XCTFail("Cleaner threw unexpected error: \(error)")

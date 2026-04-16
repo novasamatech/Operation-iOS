@@ -2,21 +2,6 @@ import Foundation
 import CoreData
 
 /**
- *  Enum defines targets (app and extensions) that share the persistent store
- *  and track history independently.
- *
- *  Each target maintains its own timestamp indicating the last processed transaction.
- *  History can only be cleaned when all targets have processed up to a common point.
- */
-
-public enum CoreDataHistoryTarget: String, CaseIterable {
-    /// Main application target.
-    case mainApp = "main_app"
-    /// Notification service extension target.
-    case notificationExtension = "notification_extension"
-}
-
-/**
  *  Protocol for cleaning persistent history transactions from the store.
  */
 
@@ -36,30 +21,29 @@ public protocol CoreDataHistoryCleaning {
  *  transactions that have been processed by all targets.
  *
  *  The cleaner only deletes history that all configured targets have processed to prevent
- *  data loss when one target hasn't caught up yet. After successful cleanup, timestamps
- *  are reset to allow the next cleanup cycle.
+ *  data loss when one target hasn't caught up yet. Timestamps are preserved after cleanup
+ *  so that each target's observer continues fetching from where it left off.
  */
 
 public struct CoreDataHistoryCleaner: CoreDataHistoryCleaning {
-    private let targets: [CoreDataHistoryTarget]
+    private let targets: [String]
     private let userDefaults: UserDefaults
-    
+
     /**
      *  Creates a new history cleaner.
      *
      *  - parameters:
-     *    - targets: Array of targets that must all have processed history before cleanup.
-     *               Defaults to all targets defined in ```CoreDataHistoryTarget```.
+     *    - targets: Array of target identifiers that must all have processed history before cleanup.
      *    - userDefaults: UserDefaults instance for reading target timestamps.
      */
     public init(
-        targets: [CoreDataHistoryTarget] = CoreDataHistoryTarget.allCases,
+        targets: [String],
         userDefaults: UserDefaults = .standard
     ) {
         self.targets = targets
         self.userDefaults = userDefaults
     }
-    
+
     /**
      *  Cleans up persistent history transactions that all targets have processed.
      *
@@ -74,11 +58,9 @@ public struct CoreDataHistoryCleaner: CoreDataHistoryCleaning {
         guard let timestamp = lastCommonTransactionTimestamp() else {
             return
         }
-        
+
         let deleteRequest = NSPersistentHistoryChangeRequest.deleteHistory(before: timestamp)
         try context.execute(deleteRequest)
-        
-        targets.forEach { userDefaults.removeObject(forKey: timestampKey(for: $0)) }
     }
 }
 
@@ -87,20 +69,19 @@ private extension CoreDataHistoryCleaner {
     /// Returns nil if any target hasn't processed history yet.
     func lastCommonTransactionTimestamp() -> Date? {
         let timestamps = targets.compactMap { lastHistoryTimestamp(for: $0) }
-        
+
         guard timestamps.count == targets.count else {
             return nil
         }
-        
+
         return timestamps.min()
     }
-    
-    func lastHistoryTimestamp(for target: CoreDataHistoryTarget) -> Date? {
+
+    func lastHistoryTimestamp(for target: String) -> Date? {
         userDefaults.object(forKey: timestampKey(for: target)) as? Date
     }
-    
-    func timestampKey(for target: CoreDataHistoryTarget) -> String {
-        "io.novasama.coredata.lastHistoryTimestamp.\(target.rawValue)"
+
+    func timestampKey(for target: String) -> String {
+        "io.novasama.coredata.lastHistoryTimestamp.\(target)"
     }
 }
-

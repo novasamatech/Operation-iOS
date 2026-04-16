@@ -49,6 +49,7 @@ public class CoreDataService {
     }
 
     var context: NSManagedObjectContext?
+    private var historyObserver: CoreDataHistoryObserver?
     private let lock = NSLock()
 
     func databaseURL(with fileManager: FileManager) -> URL? {
@@ -92,10 +93,7 @@ extension CoreDataService {
         let fileManager = FileManager.default
         let optionalDatabaseURL = self.databaseURL(with: fileManager)
         let storageType: String
-        
-        // Extract settings for history tracking configuration
-        var enableHistoryTracking = false
-        var transactionAuthor: String?
+        var historyTracking: CoreDataHistoryTrackingSettings?
 
         guard let model = NSManagedObjectModel(contentsOf: configuration.modelURL) else {
             throw CoreDataServiceError.modelInitializationFailed
@@ -114,8 +112,7 @@ extension CoreDataService {
             }
 
             storageType = NSSQLiteStoreType
-            enableHistoryTracking = settings.enableHistoryTracking
-            transactionAuthor = settings.transactionAuthor
+            historyTracking = settings.historyTracking
         case .inMemory:
             storageType = NSInMemoryStoreType
         }
@@ -124,16 +121,13 @@ extension CoreDataService {
 
         let context = NSManagedObjectContext(concurrencyType: .privateQueueConcurrencyType)
         context.persistentStoreCoordinator = coordinator
-        
-        // Configure context for history tracking
-        if let transactionAuthor {
-            context.transactionAuthor = transactionAuthor
-            context.name = transactionAuthor
-        }
-        
-        // Build store options for persistent history tracking
+
         var storeOptions: [String: Any]?
-        if enableHistoryTracking {
+
+        if let historyTracking {
+            context.transactionAuthor = historyTracking.transactionAuthor
+            context.name = historyTracking.transactionAuthor
+
             storeOptions = [
                 NSPersistentHistoryTrackingKey: true,
                 NSPersistentStoreRemoteChangeNotificationPostOptionKey: true
@@ -148,6 +142,23 @@ extension CoreDataService {
         )
 
         self.context = context
+
+        if let historyTracking {
+            let targets = historyTracking.targets.isEmpty
+                ? [historyTracking.transactionAuthor]
+                : historyTracking.targets
+
+            let sharedDefaults = UserDefaults(suiteName: historyTracking.sharedContainerName)
+
+            let observer = CoreDataHistoryObserver(
+                context: context,
+                target: historyTracking.transactionAuthor,
+                targets: targets,
+                userDefaults: sharedDefaults ?? .standard
+            )
+            observer.startObserving()
+            self.historyObserver = observer
+        }
 
         return context
     }
@@ -199,6 +210,9 @@ extension CoreDataService: CoreDataServiceProtocol {
         defer {
             lock.unlock()
         }
+
+        historyObserver?.stopObserving()
+        historyObserver = nil
 
         context?.performAndWait {
             guard let coordinator = self.context?.persistentStoreCoordinator else {

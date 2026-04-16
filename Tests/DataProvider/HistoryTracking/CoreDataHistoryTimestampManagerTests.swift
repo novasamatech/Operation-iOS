@@ -23,7 +23,7 @@ final class CoreDataHistoryTimestampManagerTests: XCTestCase {
     
     func testUpdateTimestampStoresValue() {
         // given
-        sut = CoreDataHistoryTimestampManager(target: .mainApp, userDefaults: userDefaults)
+        sut = CoreDataHistoryTimestampManager(target: CoreDataHistoryTarget.mainApp, userDefaults: userDefaults)
         let date = Date()
         
         // when
@@ -36,7 +36,7 @@ final class CoreDataHistoryTimestampManagerTests: XCTestCase {
     
     func testResetRemovesTimestamp() {
         // given
-        sut = CoreDataHistoryTimestampManager(target: .mainApp, userDefaults: userDefaults)
+        sut = CoreDataHistoryTimestampManager(target: CoreDataHistoryTarget.mainApp, userDefaults: userDefaults)
         let date = Date()
         sut.update(to: date)
         
@@ -49,8 +49,8 @@ final class CoreDataHistoryTimestampManagerTests: XCTestCase {
     
     func testDifferentTargetsHaveIndependentTimestamps() {
         // given
-        let mainAppManager = CoreDataHistoryTimestampManager(target: .mainApp, userDefaults: userDefaults)
-        let extensionManager = CoreDataHistoryTimestampManager(target: .notificationExtension, userDefaults: userDefaults)
+        let mainAppManager = CoreDataHistoryTimestampManager(target: CoreDataHistoryTarget.mainApp, userDefaults: userDefaults)
+        let extensionManager = CoreDataHistoryTimestampManager(target: "notification-extension", userDefaults: userDefaults)
         
         let mainAppDate = Date()
         let extensionDate = Date().addingTimeInterval(100)
@@ -69,11 +69,11 @@ final class CoreDataHistoryTimestampManagerTests: XCTestCase {
     func testTimestampPersistsAcrossInstances() {
         // given
         let date = Date()
-        let firstManager = CoreDataHistoryTimestampManager(target: .mainApp, userDefaults: userDefaults)
+        let firstManager = CoreDataHistoryTimestampManager(target: CoreDataHistoryTarget.mainApp, userDefaults: userDefaults)
         firstManager.update(to: date)
         
         // when
-        let secondManager = CoreDataHistoryTimestampManager(target: .mainApp, userDefaults: userDefaults)
+        let secondManager = CoreDataHistoryTimestampManager(target: CoreDataHistoryTarget.mainApp, userDefaults: userDefaults)
         
         // then
         XCTAssertNotNil(secondManager.lastTimestamp)
@@ -82,8 +82,8 @@ final class CoreDataHistoryTimestampManagerTests: XCTestCase {
     
     func testResetOnlyAffectsOwnTarget() {
         // given
-        let mainAppManager = CoreDataHistoryTimestampManager(target: .mainApp, userDefaults: userDefaults)
-        let extensionManager = CoreDataHistoryTimestampManager(target: .notificationExtension, userDefaults: userDefaults)
+        let mainAppManager = CoreDataHistoryTimestampManager(target: CoreDataHistoryTarget.mainApp, userDefaults: userDefaults)
+        let extensionManager = CoreDataHistoryTimestampManager(target: "notification-extension", userDefaults: userDefaults)
         
         let mainAppDate = Date()
         let extensionDate = Date().addingTimeInterval(100)
@@ -102,7 +102,7 @@ final class CoreDataHistoryTimestampManagerTests: XCTestCase {
     
     func testUpdateOverwritesPreviousTimestamp() {
         // given
-        sut = CoreDataHistoryTimestampManager(target: .mainApp, userDefaults: userDefaults)
+        sut = CoreDataHistoryTimestampManager(target: CoreDataHistoryTarget.mainApp, userDefaults: userDefaults)
         let firstDate = Date()
         let secondDate = Date().addingTimeInterval(500)
         
