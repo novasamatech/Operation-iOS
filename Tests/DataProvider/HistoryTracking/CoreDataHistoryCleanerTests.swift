@@ -46,7 +46,7 @@ final class CoreDataHistoryCleanerTests: XCTestCase {
             }
             
             let cleaner = CoreDataHistoryCleaner(
-                targets: [CoreDataHistoryTarget.mainApp, "notification-extension"],
+                targets: ["main-app", "notification-extension"],
                 userDefaults: self.userDefaults
             )
             
@@ -65,7 +65,7 @@ final class CoreDataHistoryCleanerTests: XCTestCase {
     
     func testCleanDoesNothingWhenOnlyOneTargetHasTimestamp() {
         // given
-        let mainAppManager = CoreDataHistoryTimestampManager(target: CoreDataHistoryTarget.mainApp, userDefaults: userDefaults)
+        let mainAppManager = CoreDataHistoryTimestampManager(target: "main-app", userDefaults: userDefaults)
         mainAppManager.update(to: Date())
         
         let expectation = XCTestExpectation()
@@ -78,7 +78,7 @@ final class CoreDataHistoryCleanerTests: XCTestCase {
             }
             
             let cleaner = CoreDataHistoryCleaner(
-                targets: [CoreDataHistoryTarget.mainApp, "notification-extension"],
+                targets: ["main-app", "notification-extension"],
                 userDefaults: self.userDefaults
             )
             
@@ -101,7 +101,7 @@ final class CoreDataHistoryCleanerTests: XCTestCase {
         // given - set timestamps for all targets
         let cleanupDate = Date()
         
-        let mainAppManager = CoreDataHistoryTimestampManager(target: CoreDataHistoryTarget.mainApp, userDefaults: userDefaults)
+        let mainAppManager = CoreDataHistoryTimestampManager(target: "main-app", userDefaults: userDefaults)
         let extensionManager = CoreDataHistoryTimestampManager(target: "notification-extension", userDefaults: userDefaults)
         
         mainAppManager.update(to: cleanupDate)
@@ -117,7 +117,7 @@ final class CoreDataHistoryCleanerTests: XCTestCase {
             }
             
             let cleaner = CoreDataHistoryCleaner(
-                targets: [CoreDataHistoryTarget.mainApp, "notification-extension"],
+                targets: ["main-app", "notification-extension"],
                 userDefaults: self.userDefaults
             )
             

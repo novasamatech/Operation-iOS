@@ -36,7 +36,7 @@ public final class CoreDataHistoryObserver {
      *
      *  - parameters:
      *    - context: The managed object context to merge remote changes into.
-     *    - target: Identifier of the current target (e.g., ```CoreDataHistoryTarget.mainApp```).
+     *    - target: Identifier of the current target (e.g., the bundle identifier).
      *    - targets: All target identifiers sharing the persistent store. Used by the cleaner
      *              to wait for all targets before deleting history. Defaults to ```[target]```.
      *    - userDefaults: UserDefaults instance for storing history timestamps.
