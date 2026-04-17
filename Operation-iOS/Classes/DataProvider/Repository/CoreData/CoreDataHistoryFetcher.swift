@@ -57,32 +57,34 @@ public struct CoreDataHistoryFetcher: CoreDataHistoryFetching {
 private extension CoreDataHistoryFetcher {
     func createFetchRequest(context: NSManagedObjectContext, fromDate: Date) -> NSPersistentHistoryChangeRequest {
         let request = NSPersistentHistoryChangeRequest.fetchHistory(after: fromDate)
-        
-        if let fetchRequest = NSPersistentHistoryTransaction.fetchRequest {
-            var predicates: [NSPredicate] = []
-            
-            if let author = context.transactionAuthor {
-                predicates.append(NSPredicate(
-                    format: "%K != %@",
-                    #keyPath(NSPersistentHistoryTransaction.author),
-                    author
-                ))
-            }
-            
-            if let contextName = context.name {
-                predicates.append(NSPredicate(
-                    format: "%K != %@",
-                    #keyPath(NSPersistentHistoryTransaction.contextName),
-                    contextName
-                ))
-            }
-            
-            if !predicates.isEmpty {
-                fetchRequest.predicate = NSCompoundPredicate(type: .and, subpredicates: predicates)
-                request.fetchRequest = fetchRequest
-            }
+
+        guard let fetchRequest = NSPersistentHistoryTransaction.fetchRequest else {
+            return request
         }
-        
+
+        var predicates: [NSPredicate] = []
+
+        if let author = context.transactionAuthor {
+            predicates.append(NSPredicate(
+                format: "%K != %@",
+                #keyPath(NSPersistentHistoryTransaction.author),
+                author
+            ))
+        }
+
+        if let contextName = context.name {
+            predicates.append(NSPredicate(
+                format: "%K != %@",
+                #keyPath(NSPersistentHistoryTransaction.contextName),
+                contextName
+            ))
+        }
+
+        if !predicates.isEmpty {
+            fetchRequest.predicate = NSCompoundPredicate(type: .and, subpredicates: predicates)
+            request.fetchRequest = fetchRequest
+        }
+
         return request
     }
 }
