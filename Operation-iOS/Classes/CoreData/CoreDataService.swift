@@ -127,6 +127,7 @@ extension CoreDataService {
         if let historyTracking {
             context.transactionAuthor = historyTracking.transactionAuthor
             context.name = historyTracking.transactionAuthor
+            context.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
 
             storeOptions = [
                 NSPersistentHistoryTrackingKey: true,
