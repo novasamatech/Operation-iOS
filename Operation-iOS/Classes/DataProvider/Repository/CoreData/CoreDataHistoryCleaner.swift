@@ -26,22 +26,17 @@ public protocol CoreDataHistoryCleaning {
  */
 
 public struct CoreDataHistoryCleaner: CoreDataHistoryCleaning {
-    private let targets: [String]
-    private let userDefaults: UserDefaults
+    private let timestampManagers: [CoreDataHistoryTimestampManaging]
 
     /**
      *  Creates a new history cleaner.
      *
      *  - parameters:
-     *    - targets: Array of target identifiers that must all have processed history before cleanup.
-     *    - userDefaults: UserDefaults instance for reading target timestamps.
+     *    - timestampManagers: Timestamp managers, one per target, that must all have
+     *      processed history before cleanup is performed.
      */
-    public init(
-        targets: [String],
-        userDefaults: UserDefaults = .standard
-    ) {
-        self.targets = targets
-        self.userDefaults = userDefaults
+    public init(timestampManagers: [CoreDataHistoryTimestampManaging]) {
+        self.timestampManagers = timestampManagers
     }
 
     /**
@@ -68,20 +63,12 @@ private extension CoreDataHistoryCleaner {
     /// Returns the oldest timestamp that all targets have processed.
     /// Returns nil if any target hasn't processed history yet.
     func lastCommonTransactionTimestamp() -> Date? {
-        let timestamps = targets.compactMap { lastHistoryTimestamp(for: $0) }
+        let timestamps = timestampManagers.compactMap { $0.lastTimestamp }
 
-        guard timestamps.count == targets.count else {
+        guard timestamps.count == timestampManagers.count else {
             return nil
         }
 
         return timestamps.min()
-    }
-
-    func lastHistoryTimestamp(for target: String) -> Date? {
-        userDefaults.object(forKey: timestampKey(for: target)) as? Date
-    }
-
-    func timestampKey(for target: String) -> String {
-        "io.novasama.coredata.lastHistoryTimestamp.\(target)"
     }
 }

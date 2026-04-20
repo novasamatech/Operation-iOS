@@ -149,13 +149,22 @@ extension CoreDataService {
                 ? [historyTracking.transactionAuthor]
                 : historyTracking.targets
 
-            let sharedDefaults = UserDefaults(suiteName: historyTracking.sharedContainerName)
+            let timestampManagers = try targets.map {
+                try CoreDataHistoryTimestampManager(
+                    target: $0,
+                    sharedContainer: historyTracking.sharedContainerName
+                )
+            }
+
+            let currentTimestampManager = try CoreDataHistoryTimestampManager(
+                target: historyTracking.transactionAuthor,
+                sharedContainer: historyTracking.sharedContainerName
+            )
 
             let observer = CoreDataHistoryObserver(
                 context: context,
-                target: historyTracking.transactionAuthor,
-                targets: targets,
-                userDefaults: sharedDefaults ?? .standard
+                timestampManager: currentTimestampManager,
+                cleaner: CoreDataHistoryCleaner(timestampManagers: timestampManagers)
             )
             observer.startObserving()
             self.historyObserver = observer

@@ -19,51 +19,33 @@ import UIKit
 
 public final class CoreDataHistoryObserver {
     private let context: NSManagedObjectContext
-    private let target: String
-
+    private let timestampManager: CoreDataHistoryTimestampManaging
     private let fetcher: CoreDataHistoryFetching
     private let merger: CoreDataHistoryMerging
     private let cleaner: CoreDataHistoryCleaning
-    private let userDefaults: UserDefaults
-
-    private lazy var timestampManager = CoreDataHistoryTimestampManager(
-        target: target,
-        userDefaults: userDefaults
-    )
 
     /**
      *  Creates a new persistent history observer.
      *
      *  - parameters:
      *    - context: The managed object context to merge remote changes into.
-     *    - target: Identifier of the current target (e.g., the bundle identifier).
-     *    - targets: All target identifiers sharing the persistent store. Used by the cleaner
-     *              to wait for all targets before deleting history. Defaults to ```[target]```.
-     *    - userDefaults: UserDefaults instance for storing history timestamps.
-     *              Should be a shared app group suite when multiple targets share the store.
+     *    - timestampManager: Timestamp manager tracking history processed by the current target.
+     *    - cleaner: Object responsible for cleaning old history across all targets.
      *    - fetcher: Object responsible for fetching history transactions. Defaults to ```CoreDataHistoryFetcher```.
      *    - merger: Object responsible for merging transactions into context. Defaults to ```CoreDataHistoryMerger```.
-     *    - cleaner: Object responsible for cleaning old history. Defaults to ```CoreDataHistoryCleaner```
-     *              with the provided targets and userDefaults.
      */
     public init(
         context: NSManagedObjectContext,
-        target: String,
-        targets: [String]? = nil,
-        userDefaults: UserDefaults = .standard,
+        timestampManager: CoreDataHistoryTimestampManaging,
+        cleaner: CoreDataHistoryCleaning,
         fetcher: CoreDataHistoryFetching = CoreDataHistoryFetcher(),
-        merger: CoreDataHistoryMerging = CoreDataHistoryMerger(),
-        cleaner: CoreDataHistoryCleaning? = nil
+        merger: CoreDataHistoryMerging = CoreDataHistoryMerger()
     ) {
         self.context = context
-        self.target = target
-        self.userDefaults = userDefaults
+        self.timestampManager = timestampManager
+        self.cleaner = cleaner
         self.fetcher = fetcher
         self.merger = merger
-        self.cleaner = cleaner ?? CoreDataHistoryCleaner(
-            targets: targets ?? [target],
-            userDefaults: userDefaults
-        )
     }
 
     /// Starts observing persistent store remote changes and app state notifications.
