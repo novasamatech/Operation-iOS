@@ -99,10 +99,13 @@ final class CoreDataHistoryObserverTests: XCTestCase {
     }
 
     func testObserverUpdatesTimestampAfterProcessing() {
-        // given
-        let sharedSuiteName = "HistoryObserverTimestampTests"
+        // given - unique shared-container name per test run; CoreDataService will build
+        // its own manager from this name, so we schedule teardown of the backing suite.
+        let sharedSuiteName = "HistoryObserverTimestampTests.\(UUID().uuidString)"
         let sharedDefaults = UserDefaults(suiteName: sharedSuiteName)!
-        sharedDefaults.removePersistentDomain(forName: sharedSuiteName)
+        addTeardownBlock {
+            sharedDefaults.removePersistentDomain(forName: sharedSuiteName)
+        }
 
         let transactionAuthor = "timestamp_test_target"
 
@@ -174,7 +177,6 @@ final class CoreDataHistoryObserverTests: XCTestCase {
         XCTAssertNotNil(timestampManager.lastTimestamp, "Timestamp should be set after processing history")
 
         // Cleanup
-        sharedDefaults.removePersistentDomain(forName: sharedSuiteName)
         try? otherAuthorService.close()
         try? service.close()
         try? service.drop()

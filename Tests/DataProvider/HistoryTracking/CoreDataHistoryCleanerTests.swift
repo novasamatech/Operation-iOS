@@ -6,51 +6,45 @@ import Helpers
 #endif
 
 final class CoreDataHistoryCleanerTests: XCTestCase {
-    
-    private var userDefaults: UserDefaults!
+
     private var databaseService: CoreDataServiceProtocol!
-    
+
     override func setUp() {
         super.setUp()
-        userDefaults = UserDefaults(suiteName: "CoreDataHistoryCleanerTests")!
-        userDefaults.removePersistentDomain(forName: "CoreDataHistoryCleanerTests")
-        
+
         let configuration = CoreDataServiceConfiguration.createConfigurationWithHistoryTracking(
             databaseName: "HistoryCleanerTests"
         )
         databaseService = CoreDataService(configuration: configuration)
     }
-    
+
     override func tearDown() {
-        userDefaults.removePersistentDomain(forName: "CoreDataHistoryCleanerTests")
-        userDefaults = nil
-        
         try? databaseService.close()
         try? databaseService.drop()
         databaseService = nil
-        
+
         super.tearDown()
     }
-    
+
     // MARK: - Tests
-    
+
     func testCleanDoesNothingWhenNoTimestampsExist() {
         // given
+        let cleaner = CoreDataHistoryCleaner(
+            timestampManagers: [
+                InMemoryHistoryTimestampManager(),
+                InMemoryHistoryTimestampManager()
+            ]
+        )
+
         let expectation = XCTestExpectation()
-        
-        databaseService.performAsync { [weak self] context, error in
-            guard let self, let context else {
+
+        databaseService.performAsync { context, error in
+            guard let context else {
                 XCTFail("Failed to get context: \(String(describing: error))")
                 expectation.fulfill()
                 return
             }
-            
-            let cleaner = CoreDataHistoryCleaner(
-                timestampManagers: [
-                    CoreDataHistoryTimestampManager(target: "main-app", userDefaults: self.userDefaults),
-                    CoreDataHistoryTimestampManager(target: "notification-extension", userDefaults: self.userDefaults)
-                ]
-            )
 
             // when/then - should not throw
             do {
@@ -67,28 +61,26 @@ final class CoreDataHistoryCleanerTests: XCTestCase {
 
     func testCleanDoesNothingWhenOnlyOneTargetHasTimestamp() {
         // given
-        let mainAppManager = CoreDataHistoryTimestampManager(target: "main-app", userDefaults: userDefaults)
-        mainAppManager.update(to: Date())
+        let mainAppManager = InMemoryHistoryTimestampManager(initial: Date())
+        let extensionManager = InMemoryHistoryTimestampManager()
+
+        let cleaner = CoreDataHistoryCleaner(
+            timestampManagers: [mainAppManager, extensionManager]
+        )
 
         let expectation = XCTestExpectation()
 
-        databaseService.performAsync { [weak self] context, error in
-            guard let self, let context else {
+        databaseService.performAsync { context, error in
+            guard let context else {
                 XCTFail("Failed to get context: \(String(describing: error))")
                 expectation.fulfill()
                 return
             }
 
-            let cleaner = CoreDataHistoryCleaner(
-                timestampManagers: [
-                    CoreDataHistoryTimestampManager(target: "main-app", userDefaults: self.userDefaults),
-                    CoreDataHistoryTimestampManager(target: "notification-extension", userDefaults: self.userDefaults)
-                ]
-            )
-            
             // when/then - should not throw and should not affect timestamps when only one target has a value
             do {
                 try cleaner.clean(context: context)
+
                 // Verify that the timestamp wasn't cleared (since not all targets have timestamps)
                 XCTAssertNotNil(mainAppManager.lastTimestamp)
                 expectation.fulfill()
@@ -97,33 +89,31 @@ final class CoreDataHistoryCleanerTests: XCTestCase {
                 expectation.fulfill()
             }
         }
-        
+
         wait(for: [expectation], timeout: Constants.expectationDuration)
     }
-    
+
     func testCleanSuccessfullyDeletesHistoryWhenAllTargetsHaveTimestamps() {
         // given - set timestamps for all targets
         let cleanupDate = Date()
-        
-        let mainAppManager = CoreDataHistoryTimestampManager(target: "main-app", userDefaults: userDefaults)
-        let extensionManager = CoreDataHistoryTimestampManager(target: "notification-extension", userDefaults: userDefaults)
 
-        mainAppManager.update(to: cleanupDate)
-        extensionManager.update(to: cleanupDate.addingTimeInterval(10)) // Extension processed slightly later
+        let mainAppManager = InMemoryHistoryTimestampManager(initial: cleanupDate)
+        // Extension processed slightly later
+        let extensionManager = InMemoryHistoryTimestampManager(initial: cleanupDate.addingTimeInterval(10))
+
+        let cleaner = CoreDataHistoryCleaner(
+            timestampManagers: [mainAppManager, extensionManager]
+        )
 
         let expectation = XCTestExpectation()
 
-        databaseService.performAsync { [weak self] context, error in
-            guard let self, let context else {
+        databaseService.performAsync { context, error in
+            guard let context else {
                 XCTFail("Failed to get context: \(String(describing: error))")
                 expectation.fulfill()
                 return
             }
 
-            let cleaner = CoreDataHistoryCleaner(
-                timestampManagers: [mainAppManager, extensionManager]
-            )
-            
             // when
             do {
                 try cleaner.clean(context: context)
@@ -138,7 +128,7 @@ final class CoreDataHistoryCleanerTests: XCTestCase {
                 expectation.fulfill()
             }
         }
-        
+
         wait(for: [expectation], timeout: Constants.expectationDuration)
     }
 }
