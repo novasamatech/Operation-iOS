@@ -15,6 +15,39 @@ public enum IncompatibleModelHandlingStrategy {
 }
 
 /**
+ *  Structure is designed to configure persistent history tracking for cross-process
+ *  change notifications.
+ *
+ *  When multiple targets (app and extensions) share the same persistent store,
+ *  history tracking enables each target to observe changes made by other targets.
+ *  The cleaner uses the full list of targets to ensure history is only deleted
+ *  after all targets have processed it.
+ */
+
+public struct CoreDataHistoryTrackingSettings {
+    /// Identifier for this target's transactions in the shared store.
+    public var transactionAuthor: String
+
+    /// All target identifiers that share the persistent store (for safe history cleanup).
+    /// When empty, defaults to ``[transactionAuthor]``.
+    public var targets: [String]
+
+    /// App group container name for shared UserDefaults across targets.
+    /// Required when multiple targets share the store so they can read each other's timestamps.
+    public var sharedContainerName: String
+
+    public init(
+        transactionAuthor: String,
+        targets: [String] = [],
+        sharedContainerName: String
+    ) {
+        self.transactionAuthor = transactionAuthor
+        self.targets = targets
+        self.sharedContainerName = sharedContainerName
+    }
+}
+
+/**
  *  Structure is designed to define persistence settings of Core Data store.
  */
 
@@ -31,6 +64,9 @@ public struct CoreDataPersistentSettings {
     /// Flag that states whether to allow database backup to iCloud.
     public var excludeFromiCloudBackup: Bool
 
+    /// Settings for persistent history tracking. When ``nil``, tracking is disabled.
+    public var historyTracking: CoreDataHistoryTrackingSettings?
+
     /**
      *  Creates Core Data persistent store settins.
      *
@@ -41,16 +77,22 @@ public struct CoreDataPersistentSettings {
      *    incompatible persisten store.
      *    - excludeFromiCloudBackup: Flag that states whether to allow database
      *    backup to iCloud.
+     *    - historyTracking: Settings for persistent history tracking.
+     *    Pass ``nil`` to disable tracking.
      */
 
-    public init(databaseDirectory: URL,
-                databaseName: String,
-                incompatibleModelStrategy: IncompatibleModelHandlingStrategy = .ignore,
-                excludeFromiCloudBackup: Bool = true) {
+    public init(
+        databaseDirectory: URL,
+        databaseName: String,
+        incompatibleModelStrategy: IncompatibleModelHandlingStrategy = .ignore,
+        excludeFromiCloudBackup: Bool = true,
+        historyTracking: CoreDataHistoryTrackingSettings? = nil
+    ) {
         self.databaseDirectory = databaseDirectory
         self.databaseName = databaseName
         self.incompatibleModelStrategy = incompatibleModelStrategy
         self.excludeFromiCloudBackup = excludeFromiCloudBackup
+        self.historyTracking = historyTracking
     }
 }
 

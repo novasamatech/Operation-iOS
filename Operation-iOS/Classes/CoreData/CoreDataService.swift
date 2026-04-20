@@ -49,6 +49,7 @@ public class CoreDataService {
     }
 
     var context: NSManagedObjectContext?
+    private var historyObserver: CoreDataHistoryObserver?
     private let lock = NSLock()
 
     func databaseURL(with fileManager: FileManager) -> URL? {
@@ -92,6 +93,7 @@ extension CoreDataService {
         let fileManager = FileManager.default
         let optionalDatabaseURL = self.databaseURL(with: fileManager)
         let storageType: String
+        var historyTracking: CoreDataHistoryTrackingSettings?
 
         guard let model = NSManagedObjectModel(contentsOf: configuration.modelURL) else {
             throw CoreDataServiceError.modelInitializationFailed
@@ -110,6 +112,7 @@ extension CoreDataService {
             }
 
             storageType = NSSQLiteStoreType
+            historyTracking = settings.historyTracking
         case .inMemory:
             storageType = NSInMemoryStoreType
         }
@@ -119,14 +122,53 @@ extension CoreDataService {
         let context = NSManagedObjectContext(concurrencyType: .privateQueueConcurrencyType)
         context.persistentStoreCoordinator = coordinator
 
+        var storeOptions: [String: Any]?
+
+        if let historyTracking {
+            context.transactionAuthor = historyTracking.transactionAuthor
+            context.name = historyTracking.transactionAuthor
+            context.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
+
+            storeOptions = [
+                NSPersistentHistoryTrackingKey: true,
+                NSPersistentStoreRemoteChangeNotificationPostOptionKey: true
+            ]
+        }
+
         try coordinator.addPersistentStore(
             ofType: storageType,
             configurationName: nil,
             at: optionalDatabaseURL,
-            options: nil
+            options: storeOptions
         )
 
         self.context = context
+
+        if let historyTracking {
+            let targets = historyTracking.targets.isEmpty
+                ? [historyTracking.transactionAuthor]
+                : historyTracking.targets
+
+            let timestampManagers = try targets.map {
+                try CoreDataHistoryTimestampManager(
+                    target: $0,
+                    sharedContainer: historyTracking.sharedContainerName
+                )
+            }
+
+            let currentTimestampManager = try CoreDataHistoryTimestampManager(
+                target: historyTracking.transactionAuthor,
+                sharedContainer: historyTracking.sharedContainerName
+            )
+
+            let observer = CoreDataHistoryObserver(
+                context: context,
+                timestampManager: currentTimestampManager,
+                cleaner: CoreDataHistoryCleaner(timestampManagers: timestampManagers)
+            )
+            observer.startObserving()
+            self.historyObserver = observer
+        }
 
         return context
     }
@@ -178,6 +220,9 @@ extension CoreDataService: CoreDataServiceProtocol {
         defer {
             lock.unlock()
         }
+
+        historyObserver?.stopObserving()
+        historyObserver = nil
 
         context?.performAndWait {
             guard let coordinator = self.context?.persistentStoreCoordinator else {
