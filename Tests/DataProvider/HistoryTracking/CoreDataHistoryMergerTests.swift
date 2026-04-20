@@ -5,187 +5,69 @@ import CoreData
 import Helpers
 #endif
 
-final class CoreDataHistoryMergerTests: XCTestCase {
-    
-    private var databaseService: CoreDataServiceProtocol!
-    private var repository: CoreDataRepository<FeedData, CDFeed>!
-    private let operationQueue = OperationQueue()
-    
-    override func setUp() {
-        super.setUp()
-        
-        let configuration = CoreDataServiceConfiguration.createConfigurationWithHistoryTracking(
-            databaseName: "HistoryMergerTests"
-        )
-        databaseService = CoreDataService(configuration: configuration)
-        
-        let sortDescriptor = NSSortDescriptor(key: FeedData.CodingKeys.name.rawValue, ascending: false)
-        let mapper = AnyCoreDataMapper(CodableCoreDataMapper<FeedData, CDFeed>())
-        repository = CoreDataRepository(
-            databaseService: databaseService,
-            mapper: mapper,
-            filter: nil,
-            sortDescriptors: [sortDescriptor]
-        )
-    }
-    
-    override func tearDown() {
-        try? databaseService.close()
-        try? databaseService.drop()
-        databaseService = nil
-        repository = nil
-        
-        super.tearDown()
-    }
-    
+final class CoreDataHistoryMergerTests: HistoryTrackingTestCase {
+
     // MARK: - Tests
-    
+
+    /// Merger is stateless for the empty path; no need to spin up a full Core Data stack.
     func testMergeReturnsEmptyArrayWhenNoTransactions() {
         // given
-        let expectation = XCTestExpectation()
-        
-        databaseService.performAsync { context, error in
-            guard let context else {
-                XCTFail("Failed to get context: \(String(describing: error))")
-                expectation.fulfill()
-                return
-            }
-            
-            let merger = CoreDataHistoryMerger()
-            
-            // when
-            let notifications = merger.merge(context: context, transactions: [])
-            
-            // then
-            XCTAssertTrue(notifications.isEmpty)
-            expectation.fulfill()
-        }
-        
-        wait(for: [expectation], timeout: Constants.expectationDuration)
-    }
-    
-    func testMergeReturnsNotificationsForEachTransaction() {
-        // given - create a second service with a different author but same database
-        let otherAuthorConfig = CoreDataServiceConfiguration.createConfigurationWithHistoryTracking(
-            databaseName: "HistoryMergerTests",
-            transactionAuthor: "other_process"
-        )
-        let otherAuthorService = CoreDataService(configuration: otherAuthorConfig)
-        
-        let sortDescriptor = NSSortDescriptor(key: FeedData.CodingKeys.name.rawValue, ascending: false)
-        let mapper = AnyCoreDataMapper(CodableCoreDataMapper<FeedData, CDFeed>())
-        let otherRepository = CoreDataRepository<FeedData, CDFeed>(
-            databaseService: otherAuthorService,
-            mapper: mapper,
-            filter: nil,
-            sortDescriptors: [sortDescriptor]
-        )
-        
-        let saveExpectation = XCTestExpectation(description: "Save data")
-        let mergeExpectation = XCTestExpectation(description: "Merge transactions")
-        let fetchDate = Date()
-        
-        // Insert data using the other author's service
-        let feeds = (0..<3).map { _ in createRandomFeed(in: .default) }
-        let operation = otherRepository.saveOperation({ feeds }, { [] })
-        operation.completionBlock = { saveExpectation.fulfill() }
-        operationQueue.addOperation(operation)
-        
-        wait(for: [saveExpectation], timeout: Constants.expectationDuration)
-        
-        // when - fetch transactions from the main service and merge them
-        databaseService.performAsync { context, error in
-            guard let context else {
-                XCTFail("Failed to get context: \(String(describing: error))")
-                mergeExpectation.fulfill()
-                return
-            }
-            
-            let fetcher = CoreDataHistoryFetcher()
-            
-            do {
-                let transactions = try fetcher.fetch(context: context, fromDate: fetchDate)
-                XCTAssertFalse(transactions.isEmpty, "Should have transactions from other author")
-                
-                let merger = CoreDataHistoryMerger()
-                
-                // when
-                let notifications = merger.merge(context: context, transactions: transactions)
-                
-                // then - should have one notification per transaction
-                XCTAssertEqual(notifications.count, transactions.count)
-                mergeExpectation.fulfill()
-            } catch {
-                XCTFail("Fetch threw unexpected error: \(error)")
-                mergeExpectation.fulfill()
-            }
-        }
-        
-        wait(for: [mergeExpectation], timeout: Constants.expectationDuration)
-        
-        // Cleanup
-        try? otherAuthorService.close()
-    }
-    
-    func testMergeNotificationsContainUserInfo() {
-        // given - create a second service with a different author but same database
-        let otherAuthorConfig = CoreDataServiceConfiguration.createConfigurationWithHistoryTracking(
-            databaseName: "HistoryMergerTests",
-            transactionAuthor: "other_process"
-        )
-        let otherAuthorService = CoreDataService(configuration: otherAuthorConfig)
-        
-        let sortDescriptor = NSSortDescriptor(key: FeedData.CodingKeys.name.rawValue, ascending: false)
-        let mapper = AnyCoreDataMapper(CodableCoreDataMapper<FeedData, CDFeed>())
-        let otherRepository = CoreDataRepository<FeedData, CDFeed>(
-            databaseService: otherAuthorService,
-            mapper: mapper,
-            filter: nil,
-            sortDescriptors: [sortDescriptor]
-        )
-        
-        let saveExpectation = XCTestExpectation(description: "Save data")
-        let mergeExpectation = XCTestExpectation(description: "Merge transactions")
-        let fetchDate = Date()
-        
-        // Insert data using the other author's service
-        let feeds = (0..<2).map { _ in createRandomFeed(in: .default) }
-        let operation = otherRepository.saveOperation({ feeds }, { [] })
-        operation.completionBlock = { saveExpectation.fulfill() }
-        operationQueue.addOperation(operation)
-        
-        wait(for: [saveExpectation], timeout: Constants.expectationDuration)
-        
+        let merger = CoreDataHistoryMerger()
+        let context = NSManagedObjectContext(concurrencyType: .privateQueueConcurrencyType)
+
         // when
-        databaseService.performAsync { context, error in
-            guard let context else {
-                XCTFail("Failed to get context: \(String(describing: error))")
-                mergeExpectation.fulfill()
-                return
-            }
-            
-            let fetcher = CoreDataHistoryFetcher()
-            
-            do {
-                let transactions = try fetcher.fetch(context: context, fromDate: fetchDate)
-                XCTAssertFalse(transactions.isEmpty, "Should have transactions from other author")
-                
-                let merger = CoreDataHistoryMerger()
-                let notifications = merger.merge(context: context, transactions: transactions)
-                
-                // then - notifications should contain userInfo with object IDs
-                XCTAssertFalse(notifications.isEmpty)
-                notifications.forEach { XCTAssertNotNil($0.userInfo, "Notification should have userInfo") }
-                mergeExpectation.fulfill()
-            } catch {
-                XCTFail("Fetch threw unexpected error: \(error)")
-                mergeExpectation.fulfill()
+        let notifications = merger.merge(context: context, transactions: [])
+
+        // then
+        XCTAssertTrue(notifications.isEmpty)
+    }
+
+    func testMergeReturnsOneNotificationPerTransaction() {
+        // given - writes from another author produce one history transaction per save
+        let (_, otherRepository) = makeOtherAuthorServiceAndRepository()
+        let fetchDate = Date().addingTimeInterval(-1)
+        let feedCount = 3
+
+        for _ in 0..<feedCount {
+            save(makeRandomFeeds(1), using: otherRepository)
+        }
+
+        // when
+        onDatabaseContext { context in
+            let transactions = try CoreDataHistoryFetcher().fetch(context: context, fromDate: fetchDate)
+            XCTAssertEqual(
+                transactions.count,
+                feedCount,
+                "Expected one transaction per save"
+            )
+
+            let notifications = CoreDataHistoryMerger().merge(context: context, transactions: transactions)
+
+            // then
+            XCTAssertEqual(notifications.count, transactions.count)
+        }
+    }
+
+    func testMergedNotificationsCarryObjectIDUserInfo() {
+        // given
+        let (_, otherRepository) = makeOtherAuthorServiceAndRepository()
+        let fetchDate = Date()
+        save(makeRandomFeeds(2), using: otherRepository)
+
+        // when
+        onDatabaseContext { context in
+            let transactions = try CoreDataHistoryFetcher().fetch(context: context, fromDate: fetchDate)
+            XCTAssertFalse(transactions.isEmpty)
+
+            let notifications = CoreDataHistoryMerger().merge(context: context, transactions: transactions)
+
+            // then - every notification should carry the object-ID userInfo payload, which is
+            // what `CoreDataContextObservable` downstream relies on.
+            XCTAssertFalse(notifications.isEmpty)
+            for notification in notifications {
+                let userInfo = try XCTUnwrap(notification.userInfo)
+                XCTAssertFalse(userInfo.isEmpty, "Object-ID notification should carry keys")
             }
         }
-        
-        wait(for: [mergeExpectation], timeout: Constants.expectationDuration)
-        
-        // Cleanup
-        try? otherAuthorService.close()
     }
 }

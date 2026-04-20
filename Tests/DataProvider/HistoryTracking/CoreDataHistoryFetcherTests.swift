@@ -5,204 +5,109 @@ import CoreData
 import Helpers
 #endif
 
-final class CoreDataHistoryFetcherTests: XCTestCase {
-    
-    private var databaseService: CoreDataServiceProtocol!
-    private var repository: CoreDataRepository<FeedData, CDFeed>!
-    private let operationQueue = OperationQueue()
-    
-    override func setUp() {
-        super.setUp()
-        
-        let configuration = CoreDataServiceConfiguration.createConfigurationWithHistoryTracking(
-            databaseName: "HistoryFetcherTests"
-        )
-        databaseService = CoreDataService(configuration: configuration)
-        
-        let sortDescriptor = NSSortDescriptor(key: FeedData.CodingKeys.name.rawValue, ascending: false)
-        let mapper = AnyCoreDataMapper(CodableCoreDataMapper<FeedData, CDFeed>())
-        repository = CoreDataRepository(
-            databaseService: databaseService,
-            mapper: mapper,
-            filter: nil,
-            sortDescriptors: [sortDescriptor]
-        )
-    }
-    
-    override func tearDown() {
-        try? databaseService.close()
-        try? databaseService.drop()
-        databaseService = nil
-        repository = nil
-        
-        super.tearDown()
-    }
-    
+final class CoreDataHistoryFetcherTests: HistoryTrackingTestCase {
+
     // MARK: - Tests
-    
+
     func testFetchReturnsEmptyArrayWhenNoChanges() {
-        // given
-        let expectation = XCTestExpectation()
-        
-        databaseService.performAsync { context, error in
-            guard let context else {
-                XCTFail("Failed to get context: \(String(describing: error))")
-                expectation.fulfill()
-                return
-            }
-            
-            let fetcher = CoreDataHistoryFetcher()
-            
-            // when
-            do {
-                let transactions = try fetcher.fetch(context: context, fromDate: Date())
-                
-                // then
-                XCTAssertTrue(transactions.isEmpty)
-                expectation.fulfill()
-            } catch {
-                XCTFail("Fetch threw unexpected error: \(error)")
-                expectation.fulfill()
-            }
+        // given/when/then
+        onDatabaseContext { context in
+            let transactions = try CoreDataHistoryFetcher().fetch(context: context, fromDate: Date())
+            XCTAssertTrue(transactions.isEmpty)
         }
-        
-        wait(for: [expectation], timeout: Constants.expectationDuration)
     }
-    
+
     func testFetchFiltersOutOwnTransactions() {
-        // given
-        let saveExpectation = XCTestExpectation(description: "Save data")
-        let fetchExpectation = XCTestExpectation(description: "Fetch history")
+        // given - save under the *same* author as the fetching context
         let fetchDate = Date()
-        
-        // Insert data using the same context/author
-        let feeds = (0..<3).map { _ in createRandomFeed(in: .default) }
-        let operation = repository.saveOperation({ feeds }, { [] })
-        operation.completionBlock = { saveExpectation.fulfill() }
-        operationQueue.addOperation(operation)
-        
-        wait(for: [saveExpectation], timeout: Constants.expectationDuration)
-        
-        // when - fetch history after insert from the same context
-        databaseService.performAsync { context, error in
-            guard let context else {
-                XCTFail("Failed to get context: \(String(describing: error))")
-                fetchExpectation.fulfill()
-                return
-            }
-            
-            let fetcher = CoreDataHistoryFetcher()
-            
-            do {
-                let transactions = try fetcher.fetch(context: context, fromDate: fetchDate)
-                
-                // then - fetcher filters out own transactions (same author/context)
-                // so we should get empty results when fetching our own changes
-                XCTAssertTrue(transactions.isEmpty, "Fetcher should filter out own transactions")
-                fetchExpectation.fulfill()
-            } catch {
-                XCTFail("Fetch threw unexpected error: \(error)")
-                fetchExpectation.fulfill()
-            }
+        save(makeRandomFeeds(3))
+
+        // Positive control: confirm the save actually produced history, so that a `[]`
+        // result below means "filtered out", not "nothing ever written".
+        onDatabaseContext { context in
+            let allHistory = try self.fetchAllHistory(context: context)
+            XCTAssertFalse(
+                allHistory.isEmpty,
+                "Sanity check: saves should have produced raw history transactions"
+            )
+
+            // when - use the public author-filtered fetcher
+            let transactions = try CoreDataHistoryFetcher().fetch(context: context, fromDate: fetchDate)
+
+            // then
+            XCTAssertTrue(transactions.isEmpty, "Fetcher must filter out own-author transactions")
         }
-        
-        wait(for: [fetchExpectation], timeout: Constants.expectationDuration)
     }
-    
+
     func testFetchWithFutureDateReturnsNoTransactions() {
         // given
-        let saveExpectation = XCTestExpectation(description: "Save data")
-        let fetchExpectation = XCTestExpectation(description: "Fetch history")
-        
-        // Insert data first
-        let feeds = (0..<3).map { _ in createRandomFeed(in: .default) }
-        let operation = repository.saveOperation({ feeds }, { [] })
-        operation.completionBlock = { saveExpectation.fulfill() }
-        operationQueue.addOperation(operation)
-        
-        wait(for: [saveExpectation], timeout: Constants.expectationDuration)
-        
-        // when - fetch with future date
+        save(makeRandomFeeds(3))
+
+        // when - fetch strictly after the saves by skipping ahead an hour
         let futureDate = Date().addingTimeInterval(3600)
-        
-        databaseService.performAsync { context, error in
-            guard let context else {
-                XCTFail("Failed to get context: \(String(describing: error))")
-                fetchExpectation.fulfill()
-                return
-            }
-            
-            let fetcher = CoreDataHistoryFetcher()
-            
-            do {
-                let transactions = try fetcher.fetch(context: context, fromDate: futureDate)
-                
-                // then - should have no transactions since we're fetching from future
-                XCTAssertTrue(transactions.isEmpty, "Should have no transactions when fetching from future date")
-                fetchExpectation.fulfill()
-            } catch {
-                XCTFail("Fetch threw unexpected error: \(error)")
-                fetchExpectation.fulfill()
-            }
+
+        onDatabaseContext { context in
+            let transactions = try CoreDataHistoryFetcher().fetch(context: context, fromDate: futureDate)
+
+            // then
+            XCTAssertTrue(transactions.isEmpty)
         }
-        
-        wait(for: [fetchExpectation], timeout: Constants.expectationDuration)
     }
-    
+
     func testFetchReturnsTransactionsFromDifferentAuthor() {
-        // given - create a second service with a different author but same database
-        let otherAuthorConfig = CoreDataServiceConfiguration.createConfigurationWithHistoryTracking(
-            databaseName: "HistoryFetcherTests",
-            transactionAuthor: "other_process"
-        )
-        let otherAuthorService = CoreDataService(configuration: otherAuthorConfig)
-        
-        let sortDescriptor = NSSortDescriptor(key: FeedData.CodingKeys.name.rawValue, ascending: false)
-        let mapper = AnyCoreDataMapper(CodableCoreDataMapper<FeedData, CDFeed>())
-        let otherRepository = CoreDataRepository<FeedData, CDFeed>(
-            databaseService: otherAuthorService,
-            mapper: mapper,
-            filter: nil,
-            sortDescriptors: [sortDescriptor]
-        )
-        
-        let saveExpectation = XCTestExpectation(description: "Save data from other author")
-        let fetchExpectation = XCTestExpectation(description: "Fetch history")
+        // given
+        let (_, otherRepository) = makeOtherAuthorServiceAndRepository()
         let fetchDate = Date()
-        
-        // Insert data using the other author's service
-        let feeds = (0..<3).map { _ in createRandomFeed(in: .default) }
-        let operation = otherRepository.saveOperation({ feeds }, { [] })
-        operation.completionBlock = { saveExpectation.fulfill() }
-        operationQueue.addOperation(operation)
-        
-        wait(for: [saveExpectation], timeout: Constants.expectationDuration)
-        
-        // when - fetch history from the main service (different author)
-        databaseService.performAsync { context, error in
-            guard let context else {
-                XCTFail("Failed to get context: \(String(describing: error))")
-                fetchExpectation.fulfill()
-                return
-            }
-            
-            let fetcher = CoreDataHistoryFetcher()
-            
-            do {
-                let transactions = try fetcher.fetch(context: context, fromDate: fetchDate)
-                
-                // then - should have transactions from the other author
-                XCTAssertFalse(transactions.isEmpty, "Should have transactions from different author")
-                fetchExpectation.fulfill()
-            } catch {
-                XCTFail("Fetch threw unexpected error: \(error)")
-                fetchExpectation.fulfill()
+        save(makeRandomFeeds(3), using: otherRepository)
+
+        // when
+        onDatabaseContext { context in
+            let transactions = try CoreDataHistoryFetcher().fetch(context: context, fromDate: fetchDate)
+
+            // then
+            XCTAssertFalse(transactions.isEmpty, "Should return transactions written by another author")
+        }
+    }
+
+    /// Covers the `fromDate` boundary: a transaction written *before* the fetch cursor must
+    /// not appear, while one written *after* must.
+    func testFetchRespectsFromDateBoundary() {
+        // given - two batches of saves, then derive the cursor from the first transaction's
+        // real timestamp. `NSPersistentHistoryChangeRequest.fetchHistory(after:)` uses a
+        // strict `>` comparison, so passing the first transaction's timestamp as the cursor
+        // excludes exactly that one transaction and returns everything newer. No wall-clock
+        // sleeps required — the cursor is tied to the data itself.
+        let (_, otherRepository) = makeOtherAuthorServiceAndRepository()
+
+        save(makeRandomFeeds(2), using: otherRepository)
+        save(makeRandomFeeds(2), using: otherRepository)
+
+        // when/then
+        onDatabaseContext { context in
+            let allTransactions = try CoreDataHistoryFetcher()
+                .fetch(context: context, fromDate: .distantPast)
+                .sorted { $0.timestamp < $1.timestamp }
+            XCTAssertGreaterThanOrEqual(
+                allTransactions.count,
+                2,
+                "Both save batches should have produced history"
+            )
+
+            let cursor = allTransactions.first!.timestamp
+
+            let afterCursor = try CoreDataHistoryFetcher().fetch(context: context, fromDate: cursor)
+            XCTAssertLessThan(
+                afterCursor.count,
+                allTransactions.count,
+                "Fetching from the cursor must exclude the earlier batch"
+            )
+            for transaction in afterCursor {
+                XCTAssertGreaterThan(
+                    transaction.timestamp,
+                    cursor,
+                    "Every returned transaction must be strictly after the cursor"
+                )
             }
         }
-        
-        wait(for: [fetchExpectation], timeout: Constants.expectationDuration)
-        
-        // Cleanup
-        try? otherAuthorService.close()
     }
 }

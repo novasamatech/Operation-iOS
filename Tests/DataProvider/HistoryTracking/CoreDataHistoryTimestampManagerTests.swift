@@ -8,25 +8,28 @@ final class CoreDataHistoryTimestampManagerTests: XCTestCase {
 
     // MARK: - Tests
 
-    func testUpdateTimestampStoresValue() {
+    func testUpdateTimestampStoresValue() throws {
         // given
-        let sut = CoreDataHistoryTimestampManager(target: "main-app", userDefaults: makeTestUserDefaults())
+        let sut = CoreDataHistoryTimestampManager(
+            target: HistoryTestAuthors.mainApp,
+            userDefaults: makeTestUserDefaults()
+        )
         let date = Date()
 
         // when
         sut.update(to: date)
 
         // then
-        XCTAssertEqual(
-            sut.lastTimestamp?.timeIntervalSince1970 ?? .nan,
-            date.timeIntervalSince1970,
-            accuracy: 0.001
-        )
+        let stored = try XCTUnwrap(sut.lastTimestamp)
+        XCTAssertEqual(stored.timeIntervalSince1970, date.timeIntervalSince1970, accuracy: 0.001)
     }
 
     func testResetRemovesTimestamp() {
         // given
-        let sut = CoreDataHistoryTimestampManager(target: "main-app", userDefaults: makeTestUserDefaults())
+        let sut = CoreDataHistoryTimestampManager(
+            target: HistoryTestAuthors.mainApp,
+            userDefaults: makeTestUserDefaults()
+        )
         sut.update(to: Date())
 
         // when
@@ -36,11 +39,17 @@ final class CoreDataHistoryTimestampManagerTests: XCTestCase {
         XCTAssertNil(sut.lastTimestamp)
     }
 
-    func testDifferentTargetsHaveIndependentTimestamps() {
+    func testDifferentTargetsHaveIndependentTimestamps() throws {
         // given - share one backing store to prove namespacing by target key
         let defaults = makeTestUserDefaults()
-        let mainAppManager = CoreDataHistoryTimestampManager(target: "main-app", userDefaults: defaults)
-        let extensionManager = CoreDataHistoryTimestampManager(target: "notification-extension", userDefaults: defaults)
+        let mainAppManager = CoreDataHistoryTimestampManager(
+            target: HistoryTestAuthors.mainApp,
+            userDefaults: defaults
+        )
+        let extensionManager = CoreDataHistoryTimestampManager(
+            target: HistoryTestAuthors.notificationExtension,
+            userDefaults: defaults
+        )
 
         let mainAppDate = Date()
         let extensionDate = Date().addingTimeInterval(100)
@@ -50,41 +59,44 @@ final class CoreDataHistoryTimestampManagerTests: XCTestCase {
         extensionManager.update(to: extensionDate)
 
         // then
-        XCTAssertEqual(
-            mainAppManager.lastTimestamp?.timeIntervalSince1970 ?? .nan,
-            mainAppDate.timeIntervalSince1970,
-            accuracy: 0.001
-        )
-        XCTAssertEqual(
-            extensionManager.lastTimestamp?.timeIntervalSince1970 ?? .nan,
-            extensionDate.timeIntervalSince1970,
-            accuracy: 0.001
-        )
+        let mainAppStored = try XCTUnwrap(mainAppManager.lastTimestamp)
+        let extensionStored = try XCTUnwrap(extensionManager.lastTimestamp)
+        XCTAssertEqual(mainAppStored.timeIntervalSince1970, mainAppDate.timeIntervalSince1970, accuracy: 0.001)
+        XCTAssertEqual(extensionStored.timeIntervalSince1970, extensionDate.timeIntervalSince1970, accuracy: 0.001)
     }
 
-    func testTimestampPersistsAcrossInstances() {
+    func testTimestampPersistsAcrossInstances() throws {
         // given - share one backing store to simulate separate instances of the same target
         let defaults = makeTestUserDefaults()
         let date = Date()
-        let firstManager = CoreDataHistoryTimestampManager(target: "main-app", userDefaults: defaults)
+        let firstManager = CoreDataHistoryTimestampManager(
+            target: HistoryTestAuthors.mainApp,
+            userDefaults: defaults
+        )
         firstManager.update(to: date)
 
         // when
-        let secondManager = CoreDataHistoryTimestampManager(target: "main-app", userDefaults: defaults)
+        let secondManager = CoreDataHistoryTimestampManager(
+            target: HistoryTestAuthors.mainApp,
+            userDefaults: defaults
+        )
 
         // then
-        XCTAssertEqual(
-            secondManager.lastTimestamp?.timeIntervalSince1970 ?? .nan,
-            date.timeIntervalSince1970,
-            accuracy: 0.001
-        )
+        let stored = try XCTUnwrap(secondManager.lastTimestamp)
+        XCTAssertEqual(stored.timeIntervalSince1970, date.timeIntervalSince1970, accuracy: 0.001)
     }
 
-    func testResetOnlyAffectsOwnTarget() {
+    func testResetOnlyAffectsOwnTarget() throws {
         // given
         let defaults = makeTestUserDefaults()
-        let mainAppManager = CoreDataHistoryTimestampManager(target: "main-app", userDefaults: defaults)
-        let extensionManager = CoreDataHistoryTimestampManager(target: "notification-extension", userDefaults: defaults)
+        let mainAppManager = CoreDataHistoryTimestampManager(
+            target: HistoryTestAuthors.mainApp,
+            userDefaults: defaults
+        )
+        let extensionManager = CoreDataHistoryTimestampManager(
+            target: HistoryTestAuthors.notificationExtension,
+            userDefaults: defaults
+        )
 
         let mainAppDate = Date()
         let extensionDate = Date().addingTimeInterval(100)
@@ -97,16 +109,16 @@ final class CoreDataHistoryTimestampManagerTests: XCTestCase {
 
         // then
         XCTAssertNil(mainAppManager.lastTimestamp)
-        XCTAssertEqual(
-            extensionManager.lastTimestamp?.timeIntervalSince1970 ?? .nan,
-            extensionDate.timeIntervalSince1970,
-            accuracy: 0.001
-        )
+        let extensionStored = try XCTUnwrap(extensionManager.lastTimestamp)
+        XCTAssertEqual(extensionStored.timeIntervalSince1970, extensionDate.timeIntervalSince1970, accuracy: 0.001)
     }
 
-    func testUpdateOverwritesPreviousTimestamp() {
+    func testUpdateOverwritesPreviousTimestamp() throws {
         // given
-        let sut = CoreDataHistoryTimestampManager(target: "main-app", userDefaults: makeTestUserDefaults())
+        let sut = CoreDataHistoryTimestampManager(
+            target: HistoryTestAuthors.mainApp,
+            userDefaults: makeTestUserDefaults()
+        )
         let firstDate = Date()
         let secondDate = Date().addingTimeInterval(500)
 
@@ -115,10 +127,7 @@ final class CoreDataHistoryTimestampManagerTests: XCTestCase {
         sut.update(to: secondDate)
 
         // then
-        XCTAssertEqual(
-            sut.lastTimestamp?.timeIntervalSince1970 ?? .nan,
-            secondDate.timeIntervalSince1970,
-            accuracy: 0.001
-        )
+        let stored = try XCTUnwrap(sut.lastTimestamp)
+        XCTAssertEqual(stored.timeIntervalSince1970, secondDate.timeIntervalSince1970, accuracy: 0.001)
     }
 }
