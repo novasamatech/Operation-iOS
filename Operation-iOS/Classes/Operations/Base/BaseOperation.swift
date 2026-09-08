@@ -27,7 +27,7 @@ public enum BaseOperationError: Error {
  *  - is initialized with error in case of failure;
  */
 
-open class BaseOperation<ResultType>: Operation {
+open class BaseOperation<ResultType>: Operation, @unchecked Sendable {
     override open var isAsynchronous: Bool {
         return true
     }

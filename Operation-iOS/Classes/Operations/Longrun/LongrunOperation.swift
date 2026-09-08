@@ -1,6 +1,6 @@
 import Foundation
 
-public final class LongrunOperation<T>: BaseOperation<T> {
+public final class LongrunOperation<T>: BaseOperation<T>, @unchecked Sendable {
     let longrun: AnyLongrun<T>
 
     public init(longrun: AnyLongrun<T>) {

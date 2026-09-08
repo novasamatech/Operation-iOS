@@ -7,7 +7,7 @@ import Foundation
  *  Operation does nothing if result is set when operation starts.
  */
 
-public final class ClosureOperation<ResultType>: BaseOperation<ResultType> {
+public final class ClosureOperation<ResultType>: BaseOperation<ResultType>, @unchecked Sendable {
 
     /// Closure to execute to produce operation result.
     public let closure: () throws -> ResultType

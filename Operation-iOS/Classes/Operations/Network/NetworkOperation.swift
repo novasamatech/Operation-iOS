@@ -9,7 +9,7 @@ import Foundation
  *  to customize request creation logic and response processing logic.
  */
 
-public final class NetworkOperation<ResultType>: BaseOperation<ResultType> {
+public final class NetworkOperation<ResultType>: BaseOperation<ResultType>, @unchecked Sendable {
     /// Network session to create intenal network data task. By default shared session is used.
     public lazy var networkSession: URLSession = URLSession.shared
 
