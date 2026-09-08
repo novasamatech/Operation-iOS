@@ -1,6 +1,6 @@
 import Foundation
 
-open class AsyncClosureOperation<ResultType>: BaseOperation<ResultType> {
+open class AsyncClosureOperation<ResultType>: BaseOperation<ResultType>, @unchecked Sendable {
     let operationClosure: (@escaping (Result<ResultType, Error>) -> Void) throws -> Void
     let cancelationClosure: (() -> Void)?
 

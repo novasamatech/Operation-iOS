@@ -14,7 +14,7 @@ let package = Package(
             targets: [name])
     ],
     dependencies: [
-        .package(url: "https://github.com/novasamatech/logger-ios", exact: "0.0.2")
+        .package(url: "https://github.com/novasamatech/logger-ios", exact: "0.1.0")
     ],
     targets: [
         .target(
