@@ -24,6 +24,9 @@ public enum CoreDataServiceError: Error {
 
     /// ```.concurrent``` mode was configured with fewer than one reader.
     case invalidReaderConcurrency(Int)
+
+    /// A context was requested but none was delivered and no other error explains why.
+    case contextUnavailable
 }
 
 /**
@@ -82,18 +85,27 @@ public class CoreDataService {
 
 // MARK: Internal Invocations logic
 extension CoreDataService {
-    /// Resolves the roles under the setup lock, opening the store on first use, then hands them to ```body```
-    /// outside the lock. Setup errors go to ```onFailure``` on the caller's thread, as ```performAsync``` always did.
+    /// Resolves the roles under the setup lock, opening the store on first use, and hands them to ```body```
+    /// while the lock is still held, so work ```body``` enqueues is guaranteed to be queued before a later
+    /// ```close()``` drains the contexts. Bodies must only enqueue asynchronously. Setup errors go to
+    /// ```onFailure``` on the caller's thread with the lock released, as a failure completion may call back
+    /// into the service.
     func withRoles(onFailure: (Error) -> Void, _ body: (CoreDataContextRoles) -> Void) {
         lock.lock()
 
+        let failure: Error?
+
         do {
-            let roles = try self.roles ?? setup()
-            lock.unlock()
-            body(roles)
+            body(try self.roles ?? setup())
+            failure = nil
         } catch {
-            lock.unlock()
-            onFailure(error)
+            failure = error
+        }
+
+        lock.unlock()
+
+        if let failure {
+            onFailure(failure)
         }
     }
 }
@@ -101,6 +113,11 @@ extension CoreDataService {
 // MARK: Internal Setup Logic
 extension CoreDataService {
     func setup() throws -> CoreDataContextRoles {
+        if case .concurrent(let readerConcurrency) = configuration.concurrencyMode, readerConcurrency < 1 {
+            // Programmer error: reject before any store is touched, so nothing is created on disk.
+            throw CoreDataServiceError.invalidReaderConcurrency(readerConcurrency)
+        }
+
         let fileManager = FileManager.default
         let optionalDatabaseURL = self.databaseURL(with: fileManager)
         let storageType: String
@@ -219,8 +236,8 @@ extension CoreDataService: CoreDataServiceProtocol {
     ) {
         withRoles(onFailure: { completion(.failure($0)) }) { roles in
             roles.writer.perform {
-                assert(!roles.writer.hasChanges, "writer entered a transaction with pending changes")
-
+                // Changes a legacy ```performAsync``` block left unsaved join this transaction, as they
+                // always did on the shared context in 2.x.
                 do {
                     let value = try block(roles.writer)
 
@@ -244,7 +261,15 @@ extension CoreDataService: CoreDataServiceProtocol {
         withRoles(onFailure: { completion(.failure($0)) }) { roles in
             guard let readerQueue = roles.readerQueue else {
                 roles.writer.perform {
-                    completion(Result { try block(roles.writer) })
+                    // Only discard what the read itself introduced; a legacy block may own pending changes.
+                    let wasClean = !roles.writer.hasChanges
+                    let result = Result { try block(roles.writer) }
+
+                    if wasClean, roles.writer.hasChanges {
+                        roles.writer.rollback()
+                    }
+
+                    completion(result)
                 }
                 return
             }
@@ -256,7 +281,6 @@ extension CoreDataService: CoreDataServiceProtocol {
                     let result = Result { try block(reader) }
 
                     if reader.hasChanges {
-                        assertionFailure("read block mutated a reader context")
                         reader.rollback()
                     }
 
@@ -274,21 +298,36 @@ extension CoreDataService: CoreDataServiceProtocol {
         }
     }
 
+    public func performWithObserver(block: @escaping CoreDataWriterObserverBlock) {
+        withRoles(onFailure: { block(nil, nil, $0) }) { roles in
+            roles.writer.perform {
+                block(roles.writer, roles.observer, nil)
+            }
+        }
+    }
+
+    /// Detaches the roles under the lock, then drains them with the lock released: queued work may call back
+    /// into the service (a read completion issuing another read, an observable reacting to a save), and those
+    /// calls must find a free lock rather than deadlock. Anything arriving after this point opens a fresh store.
     public func close() throws {
         lock.lock()
-
-        defer {
-            lock.unlock()
-        }
 
         historyObserver?.stopObserving()
         historyObserver = nil
 
         guard let roles else {
+            lock.unlock()
             return
         }
 
+        self.roles = nil
+        lock.unlock()
+
         roles.readerQueue?.waitUntilAllOperationsAreFinished()
+
+        // Flush queued transactions first: their did-save notifications enqueue the observer work that the
+        // reset below must run after.
+        roles.writer.performAndWait {}
 
         if roles.observer !== roles.writer {
             roles.observer.performAndWait {
@@ -301,8 +340,6 @@ extension CoreDataService: CoreDataServiceProtocol {
                 try? roles.coordinator.remove(store)
             }
         }
-
-        self.roles = nil
     }
 
     public func drop() throws {

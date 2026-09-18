@@ -10,8 +10,12 @@ import CoreData
  *
  *  The writer's ```NSManagedObjectContextDidSave``` payload is reduced to object identifiers on the
  *  writer's queue; resolving, filtering and mapping happen on the service's observer context, so the
- *  save never waits for mapping. Payloads carrying ```NSManagedObjectID``` values (persistent history
- *  re-posts from other processes) take the same path as live objects.
+ *  save never waits for mapping. Because that hop is asynchronous, each change is derived from the row's
+ *  committed state at resolve time (see ```resolve```), not from the category the notification filed it
+ *  under. Payloads carrying ```NSManagedObjectID``` values (persistent history re-posts from other
+ *  processes) take the same path for inserts and updates; remote deletes are delivered from the
+ *  tombstones ```CoreDataHistoryObserver``` forwards, which requires ```preserveAfterDeletion``` on the
+ *  identifier attribute of the entity.
  */
 
 final public class CoreDataContextObservable<T: Identifiable, U: NSManagedObject> {
@@ -21,6 +25,13 @@ final public class CoreDataContextObservable<T: Identifiable, U: NSManagedObject
     private(set) var predicate: (U) -> Bool
 
     private var observers: [RepositoryObserver<T>] = []
+
+    /// Captured on ```start``` and only touched on the writer's queue, where did-save notifications arrive.
+    /// Resolving directly on it keeps notification handling off the service lock, so a ```close()``` that is
+    /// draining the writer can never be re-entered from the writer.
+    private var observerContext: NSManagedObjectContext?
+
+    private var entityName: String { String(describing: U.self) }
 
     /**
      *  Creates Core Data context observable object.
@@ -54,20 +65,35 @@ final public class CoreDataContextObservable<T: Identifiable, U: NSManagedObject
     }
 
     @objc private func didReceive(notification: Notification) {
-        let pending = PendingChanges(userInfo: notification.userInfo, identifierKey: mapper.entityIdentifierFieldName) {
-            ($0 as? U).map(predicate) ?? false
-        }
+        let pending = PendingChanges(
+            userInfo: notification.userInfo,
+            entityName: entityName,
+            identifierKey: mapper.entityIdentifierFieldName
+        ) { ($0 as? U).map(predicate) ?? false }
 
         guard !pending.isEmpty else {
             return
         }
 
-        service.performObserve { [weak self] context, _ in
-            guard let self, let context else {
+        guard let observerContext else {
+            return
+        }
+
+        schedule(pending, from: notification.object as? NSManagedObjectContext, on: observerContext)
+    }
+
+    /// Runs on the writer's queue. Hands ```pending``` to the observer context for resolution.
+    private func schedule(_ pending: PendingChanges, from source: NSManagedObjectContext?, on observerContext: NSManagedObjectContext) {
+        // The writer's registered objects are the source of truth; refreshing them would discard changes a
+        // legacy block still intends to save. Any other observer context is re-faulted to the store.
+        let refreshes = observerContext !== source
+
+        observerContext.perform { [weak self] in
+            guard let self else {
                 return
             }
 
-            let changes = self.resolve(pending, in: context)
+            let changes = self.resolve(pending, in: observerContext, refreshing: refreshes)
 
             guard !changes.isEmpty else {
                 return
@@ -85,27 +111,38 @@ private extension CoreDataContextObservable {
     struct PendingChanges {
         var insertedIds: [NSManagedObjectID] = []
         var updatedIds: [NSManagedObjectID] = []
-        var deletedIds: [NSManagedObjectID] = []
         var deletedIdentifiers: [String] = []
 
         var isEmpty: Bool {
-            insertedIds.isEmpty && updatedIds.isEmpty && deletedIds.isEmpty && deletedIdentifiers.isEmpty
+            insertedIds.isEmpty && updatedIds.isEmpty && deletedIdentifiers.isEmpty
         }
 
         /// Live-object saves populate the ```...ObjectsKey``` entries; persistent-history re-posts
-        /// (```NSPersistentHistoryTransaction.objectIDNotification()```) populate ```...ObjectIDsKey```.
-        init(userInfo: [AnyHashable: Any]?, identifierKey: String, matches: (NSManagedObject) -> Bool) {
-            insertedIds = Self.objectIDs(in: userInfo, keys: [NSInsertedObjectsKey, NSInsertedObjectIDsKey])
-            updatedIds = Self.objectIDs(in: userInfo, keys: [NSUpdatedObjectsKey, NSUpdatedObjectIDsKey])
+        /// (```NSPersistentHistoryTransaction.objectIDNotification()```) populate ```...ObjectIDsKey``` and,
+        /// for deletes, the tombstones ```CoreDataHistoryObserver``` attaches. Only the observed entity is kept,
+        /// so nothing else is carried to the observer context.
+        init(
+            userInfo: [AnyHashable: Any]?,
+            entityName: String,
+            identifierKey: String,
+            matches: (NSManagedObject) -> Bool
+        ) {
+            insertedIds = Self.objectIDs(in: userInfo, entityName: entityName, keys: [NSInsertedObjectsKey, NSInsertedObjectIDsKey])
+            updatedIds = Self.objectIDs(in: userInfo, entityName: entityName, keys: [NSUpdatedObjectsKey, NSUpdatedObjectIDsKey])
 
-            for element in Self.elements(in: userInfo, keys: [NSDeletedObjectsKey, NSDeletedObjectIDsKey]) {
-                if let object = element as? NSManagedObject {
-                    // The row is gone once this notification returns; read the identifier now.
-                    if matches(object), let identifier = object.value(forKey: identifierKey) as? String {
-                        deletedIdentifiers.append(identifier)
-                    }
-                } else if let objectID = element as? NSManagedObjectID {
-                    deletedIds.append(objectID)
+            for case let object as NSManagedObject in Self.elements(in: userInfo, keys: [NSDeletedObjectsKey]) {
+                // The row is gone once this notification returns; read the identifier now.
+                if matches(object), let identifier = object.value(forKey: identifierKey) as? String {
+                    deletedIdentifiers.append(identifier)
+                }
+            }
+
+            let tombstones = userInfo?[CoreDataHistoryObserver.tombstonesKey] as? [CoreDataHistoryTombstone] ?? []
+
+            for tombstone in tombstones where tombstone.objectID.entity.name == entityName {
+                // A remote row cannot be filtered by the predicate any more; the identifier is all that survives.
+                if let identifier = tombstone.values[identifierKey] as? String {
+                    deletedIdentifiers.append(identifier)
                 }
             }
         }
@@ -114,49 +151,49 @@ private extension CoreDataContextObservable {
             keys.flatMap { (userInfo?[$0] as? NSSet)?.allObjects ?? [] }
         }
 
-        private static func objectIDs(in userInfo: [AnyHashable: Any]?, keys: [String]) -> [NSManagedObjectID] {
-            elements(in: userInfo, keys: keys).compactMap { element in
-                (element as? NSManagedObject)?.objectID ?? element as? NSManagedObjectID
-            }
+        private static func objectIDs(
+            in userInfo: [AnyHashable: Any]?,
+            entityName: String,
+            keys: [String]
+        ) -> [NSManagedObjectID] {
+            elements(in: userInfo, keys: keys)
+                .compactMap { element in
+                    (element as? NSManagedObject)?.objectID ?? element as? NSManagedObjectID
+                }
+                .filter { $0.entity.name == entityName }
         }
     }
 
-    func resolve(_ pending: PendingChanges, in context: NSManagedObjectContext) -> [DataProviderChange<T>] {
-        var changes: [DataProviderChange<T>] = []
-
-        changes += pending.updatedIds
-            .compactMap { resolveChange(for: $0, inserted: false, in: context) }
-
-        changes += pending.deletedIdentifiers
-            .map { DataProviderChange.delete(deletedIdentifier: $0) }
-
-        changes += pending.deletedIds
-            .compactMap { context.registeredObject(for: $0) as? U }
-            .filter(predicate)
-            .compactMap { $0.value(forKey: mapper.entityIdentifierFieldName) as? String }
-            .map { DataProviderChange.delete(deletedIdentifier: $0) }
-
-        changes += pending.insertedIds
-            .compactMap { resolveChange(for: $0, inserted: true, in: context) }
-
-        return changes
-    }
-
-    /// Derives the change from the row's committed state at resolve time, not from the category the
+    /// Derives every change from the row's committed state at resolve time, not from the category the
     /// notification filed it under: the hop to the observer context is asynchronous, so later commits may
     /// already have changed the row. A row that matches is an insert or update. An updated row that no
     /// longer matches has left the subscriber's set and becomes a delete; an inserted one never entered it,
     /// so it is skipped. A row that is gone is skipped too, because the save that removed it carries the
     /// identifier itself.
-    func resolveChange(
-        for objectID: NSManagedObjectID,
-        inserted: Bool,
-        in context: NSManagedObjectContext
-    ) -> DataProviderChange<T>? {
-        guard let entity = resolveEntity(for: objectID, in: context) else {
-            return nil
-        }
+    func resolve(
+        _ pending: PendingChanges,
+        in context: NSManagedObjectContext,
+        refreshing: Bool
+    ) -> [DataProviderChange<T>] {
+        let entities = materialize(pending.updatedIds + pending.insertedIds, in: context, refreshing: refreshing)
 
+        var changes: [DataProviderChange<T>] = []
+
+        changes += pending.updatedIds
+            .compactMap { entities[$0] }
+            .compactMap { change(for: $0, inserted: false) }
+
+        changes += pending.deletedIdentifiers
+            .map { DataProviderChange.delete(deletedIdentifier: $0) }
+
+        changes += pending.insertedIds
+            .compactMap { entities[$0] }
+            .compactMap { change(for: $0, inserted: true) }
+
+        return changes
+    }
+
+    func change(for entity: U, inserted: Bool) -> DataProviderChange<T>? {
         if predicate(entity) {
             guard let model = try? mapper.transform(entity: entity) else {
                 return nil
@@ -172,15 +209,37 @@ private extension CoreDataContextObservable {
         return .delete(deletedIdentifier: identifier)
     }
 
-    /// Materialises the committed row for ```objectID``` on the observer context, or ```nil``` when the row is
-    /// gone. A stale registered object is re-faulted first so the values come from the store, and
-    /// ```existingObject(with:)``` never hands back a fault, so callers never fire one against a deleted row.
-    func resolveEntity(for objectID: NSManagedObjectID, in context: NSManagedObjectContext) -> U? {
-        if let registered = context.registeredObject(for: objectID) {
-            context.refresh(registered, mergeChanges: false)
+    /// Materialises the committed rows for ```objectIDs``` with one fetch; rows that are gone are absent from
+    /// the result. When ```refreshing```, the fetch bypasses the coordinator's row cache and overwrites what
+    /// the context last saw, so values come from the store as it is now. The writer skips that: its registered
+    /// objects are the source of truth and may hold changes a legacy block still intends to save.
+    func materialize(
+        _ objectIDs: [NSManagedObjectID],
+        in context: NSManagedObjectContext,
+        refreshing: Bool
+    ) -> [NSManagedObjectID: U] {
+        guard !objectIDs.isEmpty else {
+            return [:]
         }
 
-        return (try? context.existingObject(with: objectID)) as? U
+        let request = NSFetchRequest<U>(entityName: entityName)
+        request.predicate = NSPredicate(format: "SELF IN %@", objectIDs)
+        request.returnsObjectsAsFaults = false
+        request.shouldRefreshRefetchedObjects = refreshing
+
+        let stalenessInterval = context.stalenessInterval
+
+        if refreshing {
+            context.stalenessInterval = 0
+        }
+
+        defer {
+            context.stalenessInterval = stalenessInterval
+        }
+
+        let fetched = (try? context.fetch(request)) ?? []
+
+        return Dictionary(fetched.map { ($0.objectID, $0) }, uniquingKeysWith: { first, _ in first })
     }
 
     func deliver(_ changes: [DataProviderChange<T>]) {
@@ -207,23 +266,30 @@ private extension CoreDataContextObservable {
 extension CoreDataContextObservable: DataProviderRepositoryObservable {
     public typealias Model = T
 
+    /// One hop on the writer's queue: registers for its saves and captures the observer context, so a save
+    /// issued right after ```start``` is observed and no second service call can race a ```close()```.
     public func start(completionBlock: @escaping (Error?) -> Void) {
-        service.performAsync { [weak self] (optionalContext, optionalError) in
+        service.performWithObserver { [weak self] writer, observer, error in
             guard let self else {
                 completionBlock(nil)
                 return
             }
 
-            if let context = optionalContext {
-                NotificationCenter.default.addObserver(
-                    self,
-                    selector: #selector(didReceive(notification:)),
-                    name: Notification.Name.NSManagedObjectContextDidSave,
-                    object: context
-                )
+            guard let writer, let observer else {
+                completionBlock(error)
+                return
             }
 
-            completionBlock(optionalError)
+            self.observerContext = observer
+
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(didReceive(notification:)),
+                name: Notification.Name.NSManagedObjectContextDidSave,
+                object: writer
+            )
+
+            completionBlock(nil)
         }
     }
 
@@ -235,6 +301,8 @@ extension CoreDataContextObservable: DataProviderRepositoryObservable {
             }
 
             if let context = optionalContext {
+                self.observerContext = nil
+
                 NotificationCenter.default.removeObserver(
                     self,
                     name: Notification.Name.NSManagedObjectContextDidSave,

@@ -66,6 +66,90 @@ class CoreDataHistoryObserverModeTests: HistoryTrackingTestCase {
         wait(for: [delivered], timeout: Self.coreDataTimeout)
         XCTAssertEqual(Set(inserted.map(\.identifier)), Set(feeds.map(\.identifier)))
     }
+
+    func testRemoteUpdateIsDeliveredByContextObservable() throws {
+        // given - a row this service wrote (so the coordinator's row cache holds its old values)
+        let feed = try XCTUnwrap(save(makeRandomFeeds(1)).first)
+
+        let observable = CoreDataContextObservable(
+            service: databaseService,
+            mapper: repository.dataMapper,
+            predicate: { _ in true }
+        )
+
+        let started = expectation(description: "observable started")
+        observable.start { error in
+            XCTAssertNil(error)
+            started.fulfill()
+        }
+        wait(for: [started], timeout: Self.coreDataTimeout)
+
+        let delivered = expectation(description: "remote update delivered")
+        delivered.assertForOverFulfill = false
+        var updated: [FeedData] = []
+
+        observable.addObserver(self, deliverOn: .main) { changes in
+            for case .update(let item) in changes {
+                updated.append(item)
+            }
+            if !updated.isEmpty {
+                delivered.fulfill()
+            }
+        }
+
+        // when - another author renames it
+        let (_, otherRepository) = makeOtherAuthorServiceAndRepository()
+        var renamed = feed
+        renamed.name = "remote-\(UUID().uuidString)"
+        save([renamed], using: otherRepository)
+
+        // then - the delivered item carries the remote value, not the cached one
+        wait(for: [delivered], timeout: Self.coreDataTimeout)
+        XCTAssertEqual(updated.map(\.name), [renamed.name])
+    }
+
+    func testRemoteDeleteIsDeliveredByContextObservable() throws {
+        // given - a row this service wrote and an observable watching it
+        let feed = try XCTUnwrap(save(makeRandomFeeds(1)).first)
+
+        let observable = CoreDataContextObservable(
+            service: databaseService,
+            mapper: repository.dataMapper,
+            predicate: { _ in true }
+        )
+
+        let started = expectation(description: "observable started")
+        observable.start { error in
+            XCTAssertNil(error)
+            started.fulfill()
+        }
+        wait(for: [started], timeout: Self.coreDataTimeout)
+
+        let delivered = expectation(description: "remote delete delivered")
+        delivered.assertForOverFulfill = false
+        var deleted: [String] = []
+
+        observable.addObserver(self, deliverOn: .main) { changes in
+            for case .delete(let identifier) in changes {
+                deleted.append(identifier)
+            }
+            if !deleted.isEmpty {
+                delivered.fulfill()
+            }
+        }
+
+        // when - another author deletes the row
+        let (_, otherRepository) = makeOtherAuthorServiceAndRepository()
+        let removed = expectation(description: "remote delete saved")
+        let operation = otherRepository.saveOperation({ [] }, { [feed.identifier] })
+        operation.completionBlock = { removed.fulfill() }
+        operationQueue.addOperation(operation)
+        wait(for: [removed], timeout: Self.coreDataTimeout)
+
+        // then
+        wait(for: [delivered], timeout: Self.coreDataTimeout)
+        XCTAssertEqual(deleted, [feed.identifier])
+    }
 }
 
 final class CoreDataHistoryObserverConcurrentTests: CoreDataHistoryObserverModeTests {

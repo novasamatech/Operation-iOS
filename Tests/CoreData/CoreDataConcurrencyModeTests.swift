@@ -234,7 +234,202 @@ final class CoreDataConcurrencyModeTests: XCTestCase {
     }
 }
 
+extension CoreDataConcurrencyModeTests {
+    func testCloseCompletesWhileObservedSaveIsInFlight() {
+        forEachMode(tracked: false) { service, mode in
+            let repository = Self.makeRepository(for: service)
+            let observable = CoreDataContextObservable(
+                service: service,
+                mapper: repository.dataMapper,
+                predicate: { _ in true }
+            )
+
+            let started = expectation(description: "observable started in \(mode)")
+            observable.start { _ in started.fulfill() }
+            wait(for: [started], timeout: Constants.expectationDuration)
+
+            service.performWrite({ context in
+                Thread.sleep(forTimeInterval: 0.3)
+                Self.insertFeed(identifier: UUID().uuidString, name: "in-flight", in: context)
+            }, completion: { _ in })
+
+            Thread.sleep(forTimeInterval: 0.05)
+
+            let closed = expectation(description: "close returned in \(mode)")
+            let didClose = Flag()
+            DispatchQueue.global().async {
+                do {
+                    try service.close()
+                    didClose.set()
+                } catch {
+                    XCTFail("\(mode): close threw \(error)")
+                }
+                closed.fulfill()
+            }
+
+            wait(for: [closed], timeout: 5)
+            XCTAssertNil(service.context, "\(mode): store was reopened or never closed")
+
+            // A close that never returned still holds the lock; touching the service again would hang the suite.
+            if didClose.isSet {
+                try? service.drop()
+            }
+        }
+    }
+
+    func testCloseCompletesWhenReadCompletionReentersService() {
+        forEachMode(tracked: false) { service, mode in
+            let nested = expectation(description: "nested read completed in \(mode)")
+
+            service.performRead({ _ in
+                Thread.sleep(forTimeInterval: 0.3)
+            }, completion: { _ in
+                service.performRead({ _ in }, completion: { _ in nested.fulfill() })
+            })
+
+            Thread.sleep(forTimeInterval: 0.05)
+
+            let closed = expectation(description: "close returned in \(mode)")
+            let didClose = Flag()
+            DispatchQueue.global().async {
+                do {
+                    try service.close()
+                    didClose.set()
+                } catch {
+                    XCTFail("\(mode): close threw \(error)")
+                }
+                closed.fulfill()
+            }
+
+            wait(for: [closed, nested], timeout: 5)
+
+            // A close that never returned still holds the lock; touching the service again would hang the suite.
+            if didClose.isSet {
+                try? service.close()
+                try? service.drop()
+            }
+        }
+    }
+
+    func testReadDiscardsChangesLeftOnContext() {
+        forEachMode { service, mode in
+            let identifier = UUID().uuidString
+            write(in: service) { Self.insertFeed(identifier: identifier, name: "original", in: $0) }
+
+            read(in: service) { context in
+                try Self.fetchFeed(identifier, in: context).name = "mutated"
+            }
+
+            let name = read(in: service) { try Self.fetchFeed(identifier, in: $0).name }
+            XCTAssertEqual(name, "original", mode)
+        }
+    }
+
+    func testInvalidReaderConcurrencyFailsBeforeOpeningStore() throws {
+        let configuration = CoreDataServiceConfiguration.createDefaultConfigutation(
+            with: Constants.defaultCoreDataModelName,
+            databaseName: "ConcurrencyMode-invalid-\(UUID().uuidString)",
+            incompatibleModelStrategy: .removeStore,
+            concurrencyMode: .concurrent(readerConcurrency: 0)
+        )
+        let service = CoreDataService(configuration: configuration)
+        services.append(service)
+
+        let failed = expectation(description: "read fails")
+        service.performRead({ _ in }, completion: { result in
+            guard case .failure(let error) = result,
+                  case CoreDataServiceError.invalidReaderConcurrency(0) = error else {
+                return XCTFail("expected invalidReaderConcurrency, got \(result)")
+            }
+            failed.fulfill()
+        })
+        wait(for: [failed], timeout: Constants.expectationDuration)
+
+        let url = try XCTUnwrap(service.databaseURL(with: .default))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path), "store was opened for an invalid configuration")
+    }
+
+    func testFailedSetupCompletionCanReenterService() {
+        // Setup fails on every call; the completion retries from inside the failure callback.
+        let configuration = CoreDataServiceConfiguration.createDefaultConfigutation(
+            with: Constants.defaultCoreDataModelName,
+            databaseName: "ConcurrencyMode-reenter-\(UUID().uuidString)",
+            incompatibleModelStrategy: .removeStore,
+            concurrencyMode: .concurrent(readerConcurrency: 0)
+        )
+        let service = CoreDataService(configuration: configuration)
+
+        let retried = expectation(description: "retry completed")
+
+        DispatchQueue.global().async {
+            service.performRead({ _ in }, completion: { _ in
+                service.performRead({ _ in }, completion: { _ in retried.fulfill() })
+            })
+        }
+
+        wait(for: [retried], timeout: 5)
+    }
+
+    func testObserverResolutionKeepsWriterPendingChanges() {
+        forEachMode { service, mode in
+            let repository = Self.makeRepository(for: service)
+            let observable = CoreDataContextObservable(
+                service: service,
+                mapper: repository.dataMapper,
+                predicate: { _ in true }
+            )
+
+            let started = expectation(description: "observable started in \(mode)")
+            observable.start { _ in started.fulfill() }
+            wait(for: [started], timeout: Constants.expectationDuration)
+
+            let identifier = UUID().uuidString
+            write(in: service) { Self.insertFeed(identifier: identifier, name: "original", in: $0) }
+
+            // Legacy block: saves, then leaves a change for a later save.
+            let saved = expectation(description: "legacy block ran in \(mode)")
+            service.performAsync { context, _ in
+                defer { saved.fulfill() }
+                guard let context, let feed = try? Self.fetchFeed(identifier, in: context) else {
+                    return XCTFail("\(mode): no context or feed")
+                }
+                feed.name = "saved"
+                try? context.save()
+                feed.name = "pending"
+            }
+            wait(for: [saved], timeout: Constants.expectationDuration)
+
+            let flushed = expectation(description: "pending change saved in \(mode)")
+            service.performAsync { context, _ in
+                try? context?.save()
+                flushed.fulfill()
+            }
+            wait(for: [flushed], timeout: Constants.expectationDuration)
+
+            let name = read(in: service) { try Self.fetchFeed(identifier, in: $0).name }
+            XCTAssertEqual(name, "pending", "\(mode): observer resolution discarded the writer's pending change")
+        }
+    }
+}
+
 private extension CoreDataConcurrencyModeTests {
+    final class Flag {
+        private let lock = NSLock()
+        private var value = false
+
+        var isSet: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return value
+        }
+
+        func set() {
+            lock.lock()
+            value = true
+            lock.unlock()
+        }
+    }
+
     final class CompletionOrder {
         private let lock = NSLock()
         private var storage: [String] = []
@@ -259,20 +454,60 @@ private extension CoreDataConcurrencyModeTests {
         ]
     }
 
-    func forEachMode(_ body: (CoreDataService, String) -> Void) {
+    /// Runs ```body``` once per mode. Untracked services are not closed by ```tearDown```, for cases that
+    /// exercise ```close()``` themselves and must not hang the suite if it never returns.
+    func forEachMode(tracked: Bool = true, _ body: (CoreDataService, String) -> Void) {
         for (name, mode) in modes {
             let configuration = CoreDataServiceConfiguration.createDefaultConfigutation(
                 with: Constants.defaultCoreDataModelName,
-                databaseName: "ConcurrencyMode-\(name)",
+                databaseName: tracked ? "ConcurrencyMode-\(name)" : "ConcurrencyMode-\(name)-\(UUID().uuidString)",
                 incompatibleModelStrategy: .removeStore,
                 concurrencyMode: mode
             )
 
             let service = CoreDataService(configuration: configuration)
-            services.append(service)
+
+            if tracked {
+                services.append(service)
+            }
 
             body(service, name)
         }
+    }
+
+    static func makeRepository(for service: CoreDataService) -> CoreDataRepository<FeedData, CDFeed> {
+        CoreDataRepository(
+            databaseService: service,
+            mapper: AnyCoreDataMapper(CodableCoreDataMapper<FeedData, CDFeed>()),
+            filter: nil,
+            sortDescriptors: []
+        )
+    }
+
+    static func fetchFeed(_ identifier: String, in context: NSManagedObjectContext) throws -> CDFeed {
+        let request = NSFetchRequest<CDFeed>(entityName: "CDFeed")
+        request.predicate = NSPredicate(format: "identifier == %@", identifier)
+        guard let feed = try context.fetch(request).first else {
+            throw TestError()
+        }
+        return feed
+    }
+
+    @discardableResult
+    func read<T>(in service: CoreDataService, _ block: @escaping (NSManagedObjectContext) throws -> T) -> T? {
+        let done = expectation(description: "read")
+        var value: T?
+        service.performRead(block, completion: { result in
+            switch result {
+            case .success(let result):
+                value = result
+            case .failure(let error):
+                XCTFail("read failed with \(error)")
+            }
+            done.fulfill()
+        })
+        wait(for: [done], timeout: Constants.expectationDuration)
+        return value
     }
 
     static func insertFeed(identifier: String, name: String, in context: NSManagedObjectContext) {

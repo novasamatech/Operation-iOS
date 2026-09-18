@@ -14,10 +14,24 @@ import UIKit
  *  notifications so that any ```CoreDataContextObservable``` instances listening on the
  *  same context automatically pick up the remote changes.
  *
+ *  Deleted rows are gone by the time a transaction is replayed, so their identifiers can only come from
+ *  persistent-history tombstones. The re-posted notification carries them under ```tombstonesKey``` as
+ *  ```CoreDataHistoryTombstone``` values; attributes are only preserved there when the model marks them
+ *  with ```preserveAfterDeletion```.
+ *
  *  It also observes app state to process any pending history when the app becomes active.
  */
 
+/// The attributes persistent history preserved for a row another process deleted.
+public struct CoreDataHistoryTombstone {
+    public let objectID: NSManagedObjectID
+    public let values: [AnyHashable: Any]
+}
+
 public final class CoreDataHistoryObserver {
+    /// ```userInfo``` key of the re-posted did-save notification holding ```[CoreDataHistoryTombstone]```.
+    public static let tombstonesKey = "io.novasama.coredata.history.tombstones"
+
     private let contexts: [NSManagedObjectContext]
     private let timestampManager: CoreDataHistoryTimestampManaging
     private let fetcher: CoreDataHistoryFetching
@@ -151,11 +165,23 @@ private extension CoreDataHistoryObserver {
             }
 
             // Post as didSave so CoreDataContextObservable picks up the changes
-            transactions.forEach {
+            transactions.forEach { transaction in
+                var userInfo = transaction.objectIDNotification().userInfo ?? [:]
+
+                let tombstones = (transaction.changes ?? [])
+                    .filter { $0.changeType == .delete }
+                    .compactMap { change in
+                        change.tombstone.map { CoreDataHistoryTombstone(objectID: change.changedObjectID, values: $0) }
+                    }
+
+                if !tombstones.isEmpty {
+                    userInfo[Self.tombstonesKey] = tombstones
+                }
+
                 NotificationCenter.default.post(
                     name: .NSManagedObjectContextDidSave,
                     object: self.context,
-                    userInfo: $0.objectIDNotification().userInfo
+                    userInfo: userInfo
                 )
             }
 

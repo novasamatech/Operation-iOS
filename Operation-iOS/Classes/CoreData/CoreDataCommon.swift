@@ -113,7 +113,8 @@ public enum CoreDataServiceStorageType {
  */
 
 public enum CoreDataConcurrencyMode {
-    /// One private-queue context serves reads, writes and observation. Identical to 2.x behaviour.
+    /// One private-queue context serves reads, writes and observation, as in 2.x. Change observers follow
+    /// the same state-based delivery rules as ```.concurrent```.
     case serial
 
     /**
@@ -156,6 +157,13 @@ public typealias CoreDataContextBlock<T> = (NSManagedObjectContext) throws -> T
 /// Completion of ```performWrite``` / ```performRead```.
 public typealias CoreDataResultBlock<T> = (Result<T, Error>) -> Void
 
+/// Receives the writer and the observer context together; both are ```nil``` when an error is delivered.
+public typealias CoreDataWriterObserverBlock = (
+    _ writer: NSManagedObjectContext?,
+    _ observer: NSManagedObjectContext?,
+    _ error: Error?
+) -> Void
+
 /**
  *  Protocol is designed to define an interface to manage configuration and access to Core Data store.
  */
@@ -180,7 +188,13 @@ public protocol CoreDataServiceProtocol {
 
     /**
      *  Runs ```block``` as a one-shot read. In ```.concurrent``` mode it executes on a short-lived sibling
-     *  context and may overlap other reads and the writer; changes left on the context are discarded.
+     *  context that is discarded as soon as the block returns and may overlap other reads and the writer.
+     *  Changes left on the context are discarded in every mode.
+     *
+     *  - important: The value returned from ```block``` and anything the completion captures must be plain
+     *  values, never ```NSManagedObject``` instances: in ```.concurrent``` mode their context no longer
+     *  exists by the time the completion runs. The completion runs on the reading context's queue, so
+     *  blocking there on another read can exhaust the bounded reader pool.
      */
     func performRead<T>(_ block: @escaping CoreDataContextBlock<T>, completion: @escaping CoreDataResultBlock<T>)
 
@@ -191,8 +205,14 @@ public protocol CoreDataServiceProtocol {
     func performObserve(block: @escaping CoreDataContextInvocationBlock)
 
     /**
-     *  Closes Core Data store. Implementation should open the store when a context
-     *  is requested for the first time.
+     *  Delivers the writer and the observer context together, on the writer's queue, so a component that
+     *  registers for the writer's saves and resolves them on the observer needs a single call to set up.
+     */
+    func performWithObserver(block: @escaping CoreDataWriterObserverBlock)
+
+    /**
+     *  Closes Core Data store after queued work has drained. Work that reaches the service while it is
+     *  draining, or after it returned, opens the store again on demand.
      */
     func close() throws
 
@@ -203,4 +223,64 @@ public protocol CoreDataServiceProtocol {
      *  more details.
      */
     func drop() throws
+}
+
+/**
+ *  Role entry points expressed through ```performAsync``` for conformers that predate them. Every role
+ *  resolves to the single context such a conformer hands out, which is the ```.serial``` topology.
+ */
+public extension CoreDataServiceProtocol {
+    func performWrite<T>(
+        _ block: @escaping CoreDataContextBlock<T>,
+        completion: @escaping CoreDataResultBlock<T>
+    ) {
+        performAsync { context, error in
+            guard let context else {
+                return completion(.failure(error ?? CoreDataServiceError.contextUnavailable))
+            }
+
+            do {
+                let value = try block(context)
+
+                if context.hasChanges {
+                    try context.save()
+                }
+
+                completion(.success(value))
+            } catch {
+                context.rollback()
+                completion(.failure(error))
+            }
+        }
+    }
+
+    func performRead<T>(
+        _ block: @escaping CoreDataContextBlock<T>,
+        completion: @escaping CoreDataResultBlock<T>
+    ) {
+        performAsync { context, error in
+            guard let context else {
+                return completion(.failure(error ?? CoreDataServiceError.contextUnavailable))
+            }
+
+            let wasClean = !context.hasChanges
+            let result = Result { try block(context) }
+
+            if wasClean, context.hasChanges {
+                context.rollback()
+            }
+
+            completion(result)
+        }
+    }
+
+    func performObserve(block: @escaping CoreDataContextInvocationBlock) {
+        performAsync(block: block)
+    }
+
+    func performWithObserver(block: @escaping CoreDataWriterObserverBlock) {
+        performAsync { context, error in
+            block(context, context, error)
+        }
+    }
 }

@@ -193,6 +193,13 @@ class CoreDataContextObserverTests: XCTestCase {
         }
     }
 
+    func testInsertThenUpdateLeavingPredicateEndsWithDeleteRepeatedly() {
+        // The race between the second commit and the first resolve is timing-dependent; repeat to expose it.
+        for _ in 0 ..< 15 {
+            testInsertThenUpdateLeavingPredicateEndsWithDelete()
+        }
+    }
+
     func testInsertThenUpdateLeavingPredicateEndsWithDelete() {
         var feed = createRandomFeed(in: .default)
         feed.favorite = true
@@ -323,8 +330,19 @@ class CoreDataContextObserverTests: XCTestCase {
             }
         }
 
+        // The queue is concurrent; chain the saves so they commit in the given order while the observer
+        // still resolves them asynchronously.
+        var previous: Operation?
+
         for save in saves {
-            operationQueue.addOperation(repository.saveOperation({ save }, { [] }))
+            let operation = repository.saveOperation({ save }, { [] })
+
+            if let previous {
+                operation.addDependency(previous)
+            }
+
+            operationQueue.addOperation(operation)
+            previous = operation
         }
 
         wait(for: [expectation], timeout: Constants.expectationDuration)
