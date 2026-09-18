@@ -172,6 +172,59 @@ class CoreDataContextObserverTests: XCTestCase {
         performTest(updateObjects: insertingObjects + updatingObjects, deletedIds: deletingIds, changesValidationBlock: validationBlock)
     }
 
+    func testUpdateLeavingPredicateDeliversDelete() {
+        var feed = createRandomFeed(in: .default)
+        feed.favorite = true
+        performSaveOperation(with: [feed], deletedIds: [])
+
+        var updated = feed
+        updated.favorite = false
+
+        let validationBlock: ([DataProviderChange<FeedData>]) -> Bool = { changes in
+            guard changes.count == 1, case .delete(let identifier) = changes[0] else {
+                return false
+            }
+
+            return identifier == feed.identifier
+        }
+
+        performTest(updateObjects: [updated], deletedIds: [], changesValidationBlock: validationBlock) {
+            ($0 as? CDFeed)?.favorite ?? false
+        }
+    }
+
+    func testInsertThenUpdateLeavingPredicateEndsWithDelete() {
+        var feed = createRandomFeed(in: .default)
+        feed.favorite = true
+
+        var updated = feed
+        updated.favorite = false
+
+        // The insert may resolve before or after the second commit lands, so it arrives as an insert
+        // or is skipped; either way the row must not survive in the subscriber's set.
+        let deliveries = collectDeliveries(saves: [[feed], [updated]], predicateBlock: {
+            ($0 as? CDFeed)?.favorite ?? false
+        }, until: { changes in
+            if case .delete = changes.last { return true } else { return false }
+        })
+
+        XCTAssertTrue((1...2).contains(deliveries.count), "unexpected deliveries: \(deliveries)")
+
+        guard case .delete(let identifier) = deliveries.last?.last else {
+            return XCTFail("expected final delivery to be delete, got \(String(describing: deliveries.last))")
+        }
+
+        XCTAssertEqual(identifier, feed.identifier)
+
+        if deliveries.count == 2 {
+            guard case .insert(let item) = deliveries[0].first else {
+                return XCTFail("expected first delivery to be insert, got \(deliveries[0])")
+            }
+
+            XCTAssertEqual(item, feed)
+        }
+    }
+
     // MARK: Private
 
     private func performTest(updateObjects: [FeedData],
@@ -233,5 +286,49 @@ class CoreDataContextObserverTests: XCTestCase {
         wait(for: [expectation], timeout: Constants.expectationDuration)
 
         return result
+    }
+
+    /// Starts an observable, enqueues ```saves``` back to back and returns the change batches delivered up to
+    /// and including the first one ```until``` accepts.
+    private func collectDeliveries(
+        saves: [[FeedData]],
+        predicateBlock: @escaping (NSManagedObject) -> Bool,
+        until: @escaping ([DataProviderChange<FeedData>]) -> Bool
+    ) -> [[DataProviderChange<FeedData>]] {
+        let observable = CoreDataContextObservable(service: Self.facade.databaseService,
+                                                   mapper: repository.dataMapper,
+                                                   predicate: predicateBlock)
+
+        let startExpectation = XCTestExpectation()
+
+        observable.start { optionalError in
+            if let error = optionalError {
+                XCTFail("Did receive error \(error)")
+            }
+
+            startExpectation.fulfill()
+        }
+
+        wait(for: [startExpectation], timeout: Constants.expectationDuration)
+
+        let expectation = XCTestExpectation()
+
+        var deliveries: [[DataProviderChange<FeedData>]] = []
+
+        observable.addObserver(self, deliverOn: .main) { changes in
+            deliveries.append(changes)
+
+            if until(changes) {
+                expectation.fulfill()
+            }
+        }
+
+        for save in saves {
+            operationQueue.addOperation(repository.saveOperation({ save }, { [] }))
+        }
+
+        wait(for: [expectation], timeout: Constants.expectationDuration)
+
+        return deliveries
     }
 }

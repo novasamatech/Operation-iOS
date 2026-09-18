@@ -125,9 +125,7 @@ private extension CoreDataContextObservable {
         var changes: [DataProviderChange<T>] = []
 
         changes += pending.updatedIds
-            .compactMap { resolveEntity(for: $0, in: context) }
-            .compactMap { try? mapper.transform(entity: $0) }
-            .map { DataProviderChange.update(newItem: $0) }
+            .compactMap { resolveChange(for: $0, inserted: false, in: context) }
 
         changes += pending.deletedIdentifiers
             .map { DataProviderChange.delete(deletedIdentifier: $0) }
@@ -139,27 +137,50 @@ private extension CoreDataContextObservable {
             .map { DataProviderChange.delete(deletedIdentifier: $0) }
 
         changes += pending.insertedIds
-            .compactMap { resolveEntity(for: $0, in: context) }
-            .compactMap { try? mapper.transform(entity: $0) }
-            .map { DataProviderChange.insert(newItem: $0) }
+            .compactMap { resolveChange(for: $0, inserted: true, in: context) }
 
         return changes
     }
 
-    /// Materialises the committed row for ```objectID``` on the observer context. A stale registered
-    /// object is re-faulted first, so mapping never reads values the merge has not reached yet.
+    /// Derives the change from the row's committed state at resolve time, not from the category the
+    /// notification filed it under: the hop to the observer context is asynchronous, so later commits may
+    /// already have changed the row. A row that matches is an insert or update. An updated row that no
+    /// longer matches has left the subscriber's set and becomes a delete; an inserted one never entered it,
+    /// so it is skipped. A row that is gone is skipped too, because the save that removed it carries the
+    /// identifier itself.
+    func resolveChange(
+        for objectID: NSManagedObjectID,
+        inserted: Bool,
+        in context: NSManagedObjectContext
+    ) -> DataProviderChange<T>? {
+        guard let entity = resolveEntity(for: objectID, in: context) else {
+            return nil
+        }
+
+        if predicate(entity) {
+            guard let model = try? mapper.transform(entity: entity) else {
+                return nil
+            }
+
+            return inserted ? .insert(newItem: model) : .update(newItem: model)
+        }
+
+        guard !inserted, let identifier = entity.value(forKey: mapper.entityIdentifierFieldName) as? String else {
+            return nil
+        }
+
+        return .delete(deletedIdentifier: identifier)
+    }
+
+    /// Materialises the committed row for ```objectID``` on the observer context, or ```nil``` when the row is
+    /// gone. A stale registered object is re-faulted first so the values come from the store, and
+    /// ```existingObject(with:)``` never hands back a fault, so callers never fire one against a deleted row.
     func resolveEntity(for objectID: NSManagedObjectID, in context: NSManagedObjectContext) -> U? {
-        guard let entity = context.object(with: objectID) as? U else {
-            return nil
+        if let registered = context.registeredObject(for: objectID) {
+            context.refresh(registered, mergeChanges: false)
         }
 
-        context.refresh(entity, mergeChanges: false)
-
-        guard predicate(entity) else {
-            return nil
-        }
-
-        return entity
+        return (try? context.existingObject(with: objectID)) as? U
     }
 
     func deliver(_ changes: [DataProviderChange<T>]) {
