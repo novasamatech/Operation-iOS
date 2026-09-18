@@ -109,6 +109,21 @@ public enum CoreDataServiceStorageType {
 }
 
 /**
+ *  Enum defines how the service maps roles (writer, observer, readers) onto managed object contexts.
+ */
+
+public enum CoreDataConcurrencyMode {
+    /// One private-queue context serves reads, writes and observation. Identical to 2.x behaviour.
+    case serial
+
+    /**
+     *  A dedicated writer and observer context on the shared coordinator; one-shot reads run on
+     *  short-lived sibling contexts, at most `readerConcurrency` at a time. Must be at least 1.
+     */
+    case concurrent(readerConcurrency: Int)
+}
+
+/**
  *  Protocol is designed to define configuration of Core Data service.
  */
 
@@ -118,6 +133,13 @@ public protocol CoreDataServiceConfigurationProtocol {
 
     /// Storage type to use.
     var storageType: CoreDataServiceStorageType { get }
+
+    /// Context topology. Defaults to ```.serial``` for conformers that predate the setting.
+    var concurrencyMode: CoreDataConcurrencyMode { get }
+}
+
+public extension CoreDataServiceConfigurationProtocol {
+    var concurrencyMode: CoreDataConcurrencyMode { .serial }
 }
 
 /**
@@ -127,6 +149,12 @@ public protocol CoreDataServiceConfigurationProtocol {
  */
 
 public typealias CoreDataContextInvocationBlock = (NSManagedObjectContext?, Error?) -> Void
+
+/// Work executed on a context's own queue; the returned value is delivered to the completion.
+public typealias CoreDataContextBlock<T> = (NSManagedObjectContext) throws -> T
+
+/// Completion of ```performWrite``` / ```performRead```.
+public typealias CoreDataResultBlock<T> = (Result<T, Error>) -> Void
 
 /**
  *  Protocol is designed to define an interface to manage configuration and access to Core Data store.
@@ -143,6 +171,24 @@ public protocol CoreDataServiceProtocol {
      */
 
     func performAsync(block: @escaping CoreDataContextInvocationBlock)
+
+    /**
+     *  Runs ```block``` on the writer context as one transaction: the context is saved when the block
+     *  leaves changes and rolled back when it throws. Writes are serialized in call order.
+     */
+    func performWrite<T>(_ block: @escaping CoreDataContextBlock<T>, completion: @escaping CoreDataResultBlock<T>)
+
+    /**
+     *  Runs ```block``` as a one-shot read. In ```.concurrent``` mode it executes on a short-lived sibling
+     *  context and may overlap other reads and the writer; changes left on the context are discarded.
+     */
+    func performRead<T>(_ block: @escaping CoreDataContextBlock<T>, completion: @escaping CoreDataResultBlock<T>)
+
+    /**
+     *  Delivers the observer context for long-lived observation such as fetched results controllers.
+     *  The context merges every writer save automatically and is never reset while the store is open.
+     */
+    func performObserve(block: @escaping CoreDataContextInvocationBlock)
 
     /**
      *  Closes Core Data store. Implementation should open the store when a context

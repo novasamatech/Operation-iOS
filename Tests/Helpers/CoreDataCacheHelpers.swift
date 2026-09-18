@@ -8,12 +8,25 @@ public func clear(databaseService: CoreDataServiceProtocol) throws {
 }
 
 public final class CoreDataRepositoryFacade {
-    public static let shared = CoreDataRepositoryFacade()
+    public static let shared = CoreDataRepositoryFacade(
+        databaseName: Constants.defaultCoreDataModelName,
+        concurrencyMode: .serial
+    )
+
+    public static let concurrent = CoreDataRepositoryFacade(
+        databaseName: "\(Constants.defaultCoreDataModelName)Concurrent",
+        concurrencyMode: .concurrent(readerConcurrency: 2)
+    )
 
     public let databaseService: CoreDataServiceProtocol
 
-    private init() {
-        let configuration = CoreDataServiceConfiguration.createDefaultConfigutation()
+    private init(databaseName: String, concurrencyMode: CoreDataConcurrencyMode) {
+        let configuration = CoreDataServiceConfiguration.createDefaultConfigutation(
+            with: Constants.defaultCoreDataModelName,
+            databaseName: databaseName,
+            incompatibleModelStrategy: .ignore,
+            concurrencyMode: concurrencyMode
+        )
         databaseService = CoreDataService(configuration: configuration)
     }
 

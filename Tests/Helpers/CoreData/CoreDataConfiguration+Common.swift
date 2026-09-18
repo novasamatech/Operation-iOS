@@ -11,7 +11,8 @@ extension CoreDataServiceConfiguration {
     public static func createDefaultConfigutation(
         with modelName: String,
         databaseName: String,
-        incompatibleModelStrategy: IncompatibleModelHandlingStrategy
+        incompatibleModelStrategy: IncompatibleModelHandlingStrategy,
+        concurrencyMode: CoreDataConcurrencyMode = .serial
     ) -> CoreDataServiceConfiguration {
         let bundle: Bundle
 #if SWIFT_PACKAGE
@@ -31,7 +32,8 @@ extension CoreDataServiceConfiguration {
                                                             incompatibleModelStrategy: incompatibleModelStrategy)
 
         let configuration = CoreDataServiceConfiguration(modelURL: modelURL!,
-                                                         storageType: .persistent(settings: persistentSettings))
+                                                         storageType: .persistent(settings: persistentSettings),
+                                                         concurrencyMode: concurrencyMode)
 
         return configuration
     }
@@ -42,7 +44,8 @@ extension CoreDataServiceConfiguration {
         incompatibleModelStrategy: IncompatibleModelHandlingStrategy = .removeStore,
         transactionAuthor: String = "test",
         targets: [String] = [],
-        sharedContainerName: String = "test"
+        sharedContainerName: String = "test",
+        concurrencyMode: CoreDataConcurrencyMode = .serial
     ) -> CoreDataServiceConfiguration {
         let bundle: Bundle
 #if SWIFT_PACKAGE
@@ -71,8 +74,10 @@ extension CoreDataServiceConfiguration {
         )
 
         let configuration = CoreDataServiceConfiguration(modelURL: modelURL!,
-                                                         storageType: .persistent(settings: persistentSettings))
+                                                         storageType: .persistent(settings: persistentSettings),
+                                                         concurrencyMode: concurrencyMode)
 
         return configuration
     }
 }
+

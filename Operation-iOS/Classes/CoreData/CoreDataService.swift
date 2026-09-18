@@ -21,6 +21,9 @@ public enum CoreDataServiceError: Error {
 
     /// Can't remove incompatible persistent store.
     case incompatibleModelRemoveFailed
+
+    /// ```.concurrent``` mode was configured with fewer than one reader.
+    case invalidReaderConcurrency(Int)
 }
 
 /**
@@ -29,12 +32,6 @@ public enum CoreDataServiceError: Error {
  */
 
 public class CoreDataService {
-    enum SetupState {
-        case initial
-        case inprogress
-        case completed
-    }
-
     public let configuration: CoreDataServiceConfigurationProtocol
 
     /**
@@ -48,9 +45,14 @@ public class CoreDataService {
         self.configuration = configuration
     }
 
-    var context: NSManagedObjectContext?
+    private(set) var roles: CoreDataContextRoles?
     private var historyObserver: CoreDataHistoryObserver?
     private let lock = NSLock()
+
+    /// The writer context, or ```nil``` while the store is closed.
+    var context: NSManagedObjectContext? {
+        roles?.writer
+    }
 
     func databaseURL(with fileManager: FileManager) -> URL? {
         guard case .persistent(let settings) = configuration.storageType else {
@@ -80,16 +82,25 @@ public class CoreDataService {
 
 // MARK: Internal Invocations logic
 extension CoreDataService {
-    func invoke(block: @escaping CoreDataContextInvocationBlock, in context: NSManagedObjectContext) {
-        context.perform {
-            block(context, nil)
+    /// Resolves the roles under the setup lock, opening the store on first use, then hands them to ```body```
+    /// outside the lock. Setup errors go to ```onFailure``` on the caller's thread, as ```performAsync``` always did.
+    func withRoles(onFailure: (Error) -> Void, _ body: (CoreDataContextRoles) -> Void) {
+        lock.lock()
+
+        do {
+            let roles = try self.roles ?? setup()
+            lock.unlock()
+            body(roles)
+        } catch {
+            lock.unlock()
+            onFailure(error)
         }
     }
 }
 
 // MARK: Internal Setup Logic
 extension CoreDataService {
-    func setup() throws -> NSManagedObjectContext {
+    func setup() throws -> CoreDataContextRoles {
         let fileManager = FileManager.default
         let optionalDatabaseURL = self.databaseURL(with: fileManager)
         let storageType: String
@@ -119,16 +130,9 @@ extension CoreDataService {
 
         let coordinator = NSPersistentStoreCoordinator(managedObjectModel: model)
 
-        let context = NSManagedObjectContext(concurrencyType: .privateQueueConcurrencyType)
-        context.persistentStoreCoordinator = coordinator
-
         var storeOptions: [String: Any]?
 
-        if let historyTracking {
-            context.transactionAuthor = historyTracking.transactionAuthor
-            context.name = historyTracking.transactionAuthor
-            context.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
-
+        if historyTracking != nil {
             storeOptions = [
                 NSPersistentHistoryTrackingKey: true,
                 NSPersistentStoreRemoteChangeNotificationPostOptionKey: true
@@ -142,7 +146,13 @@ extension CoreDataService {
             options: storeOptions
         )
 
-        self.context = context
+        let roles = try CoreDataContextRoles.make(
+            coordinator: coordinator,
+            mode: configuration.concurrencyMode,
+            historyTracking: historyTracking
+        )
+
+        self.roles = roles
 
         if let historyTracking {
             let targets = historyTracking.targets.isEmpty
@@ -162,7 +172,7 @@ extension CoreDataService {
             )
 
             let observer = CoreDataHistoryObserver(
-                context: context,
+                contexts: roles.allContexts,
                 timestampManager: currentTimestampManager,
                 cleaner: CoreDataHistoryCleaner(timestampManagers: timestampManagers)
             )
@@ -170,7 +180,7 @@ extension CoreDataService {
             self.historyObserver = observer
         }
 
-        return context
+        return roles
     }
 }
 
@@ -196,21 +206,71 @@ extension CoreDataService {
 
 extension CoreDataService: CoreDataServiceProtocol {
     public func performAsync(block: @escaping CoreDataContextInvocationBlock) {
-        lock.lock()
+        withRoles(onFailure: { block(nil, $0) }) { roles in
+            roles.writer.perform {
+                block(roles.writer, nil)
+            }
+        }
+    }
 
-        do {
-            if let context = context {
-                invoke(block: block, in: context)
-            } else {
-                let context = try setup()
-                invoke(block: block, in: context)
+    public func performWrite<T>(
+        _ block: @escaping CoreDataContextBlock<T>,
+        completion: @escaping CoreDataResultBlock<T>
+    ) {
+        withRoles(onFailure: { completion(.failure($0)) }) { roles in
+            roles.writer.perform {
+                assert(!roles.writer.hasChanges, "writer entered a transaction with pending changes")
+
+                do {
+                    let value = try block(roles.writer)
+
+                    if roles.writer.hasChanges {
+                        try roles.writer.save()
+                    }
+
+                    completion(.success(value))
+                } catch {
+                    roles.writer.rollback()
+                    completion(.failure(error))
+                }
+            }
+        }
+    }
+
+    public func performRead<T>(
+        _ block: @escaping CoreDataContextBlock<T>,
+        completion: @escaping CoreDataResultBlock<T>
+    ) {
+        withRoles(onFailure: { completion(.failure($0)) }) { roles in
+            guard let readerQueue = roles.readerQueue else {
+                roles.writer.perform {
+                    completion(Result { try block(roles.writer) })
+                }
+                return
             }
 
-            lock.unlock()
-        } catch {
-            lock.unlock()
+            readerQueue.addOperation {
+                let reader = roles.makeReader()
 
-            block(nil, error)
+                reader.performAndWait {
+                    let result = Result { try block(reader) }
+
+                    if reader.hasChanges {
+                        assertionFailure("read block mutated a reader context")
+                        reader.rollback()
+                    }
+
+                    completion(result)
+                }
+            }
+        }
+    }
+
+    public func performObserve(block: @escaping CoreDataContextInvocationBlock) {
+        withRoles(onFailure: { block(nil, $0) }) { roles in
+            roles.observer.perform {
+                block(roles.observer, nil)
+            }
         }
     }
 
@@ -224,17 +284,25 @@ extension CoreDataService: CoreDataServiceProtocol {
         historyObserver?.stopObserving()
         historyObserver = nil
 
-        context?.performAndWait {
-            guard let coordinator = self.context?.persistentStoreCoordinator else {
-                return
-            }
-
-            for store in coordinator.persistentStores {
-                try? coordinator.remove(store)
-            }
-
-            self.context = nil
+        guard let roles else {
+            return
         }
+
+        roles.readerQueue?.waitUntilAllOperationsAreFinished()
+
+        if roles.observer !== roles.writer {
+            roles.observer.performAndWait {
+                roles.observer.reset()
+            }
+        }
+
+        roles.writer.performAndWait {
+            for store in roles.coordinator.persistentStores {
+                try? roles.coordinator.remove(store)
+            }
+        }
+
+        self.roles = nil
     }
 
     public func drop() throws {
@@ -244,7 +312,7 @@ extension CoreDataService: CoreDataServiceProtocol {
             lock.unlock()
         }
 
-        guard context == nil else {
+        guard roles == nil else {
             throw CoreDataServiceError.unexpectedDropWhenOpen
         }
 

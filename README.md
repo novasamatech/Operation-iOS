@@ -8,6 +8,28 @@ To run the example project, clone the repo, and run `pod install` from the Examp
 pod 'Operation-iOS', :git => 'https://github.com/novasamatech/Operation-iOS.git', :tag => '1.0.0'
 ```
 
+## Core Data concurrency modes
+
+`CoreDataServiceConfiguration` takes a `concurrencyMode` (default `.serial`):
+
+- `.serial` — one private-queue context serves reads, writes and observation. Identical to 2.x.
+- `.concurrent(readerConcurrency:)` — a dedicated writer context, an observer context that merges every
+  writer save automatically (`automaticallyMergesChangesFromParent`), and short-lived reader contexts
+  created per read, at most `readerConcurrency` at a time.
+
+`CoreDataServiceProtocol` exposes one entry point per role:
+
+| Entry point | Context | Contract |
+|---|---|---|
+| `performWrite(_:completion:)` | writer | One transaction: saved when the block leaves changes, rolled back when it throws. Serialized in call order. |
+| `performRead(_:completion:)` | reader | One-shot read that may overlap the writer and other reads. Changes left on the context are discarded. |
+| `performObserve(block:)` | observer | Long-lived observation (fetched results controllers, change observers). Never reset while open. |
+| `performAsync(block:)` | writer | Legacy entry point; the block owns `save()` / `rollback()`. |
+
+`CoreDataRepository` routes fetches to `performRead` and saves to `performWrite`. `CoreDataContextObservable`
+reduces the writer's did-save payload to object identifiers and maps on the observer context, so a save never
+waits for mapping; persistent-history re-posts from other processes take the same path.
+
 ## Author
 
 ERussel, emkil.russel@gmail.com

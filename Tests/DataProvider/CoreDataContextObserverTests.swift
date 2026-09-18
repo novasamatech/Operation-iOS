@@ -6,19 +6,22 @@ import Helpers
 #endif
 
 class CoreDataContextObserverTests: XCTestCase {
-    let repository: CoreDataRepository<FeedData, CDFeed> = {
+    /// The store the cases run against; the concurrent subclass swaps it.
+    class var facade: CoreDataRepositoryFacade { .shared }
+
+    lazy var repository: CoreDataRepository<FeedData, CDFeed> = {
         let sortDescriptor = NSSortDescriptor(key: FeedData.CodingKeys.name.rawValue, ascending: false)
-        return CoreDataRepositoryFacade.shared.createCoreDataRepository(sortDescriptors: [sortDescriptor])
+        return Self.facade.createCoreDataRepository(sortDescriptors: [sortDescriptor])
     }()
 
     let operationQueue: OperationQueue = OperationQueue()
 
     override func setUp() {
-        try! CoreDataRepositoryFacade.shared.clearDatabase()
+        try! Self.facade.clearDatabase()
     }
 
     override func tearDown() {
-        try! CoreDataRepositoryFacade.shared.clearDatabase()
+        try! Self.facade.clearDatabase()
     }
 
     func testInsertionWhenListEmpty() {
@@ -183,7 +186,7 @@ class CoreDataContextObserverTests: XCTestCase {
                              deletedIds: [String],
                              changesValidationBlock: @escaping ([DataProviderChange<FeedData>]) -> Bool,
                              predicateBlock: @escaping (NSManagedObject) -> Bool) {
-        let observable = CoreDataContextObservable(service: CoreDataRepositoryFacade.shared.databaseService,
+        let observable = CoreDataContextObservable(service: Self.facade.databaseService,
                                                    mapper: repository.dataMapper,
                                                    predicate: predicateBlock)
 

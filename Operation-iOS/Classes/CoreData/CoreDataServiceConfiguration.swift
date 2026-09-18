@@ -12,16 +12,25 @@ public struct CoreDataServiceConfiguration: CoreDataServiceConfigurationProtocol
     /// Type of the Core Data store.
     public var storageType: CoreDataServiceStorageType
 
+    /// Context topology; ```.serial``` reproduces 2.x behaviour.
+    public var concurrencyMode: CoreDataConcurrencyMode
+
     /**
      *  Creates Core Data service configuration.
      *
      *  - parameters:
      *    - modelURL: URL to Core Data entity model.
      *    - storageType: Type of the Core Data store.
+     *    - concurrencyMode: Context topology. Defaults to ```.serial```.
      */
 
-    public init(modelURL: URL, storageType: CoreDataServiceStorageType) {
+    public init(
+        modelURL: URL,
+        storageType: CoreDataServiceStorageType,
+        concurrencyMode: CoreDataConcurrencyMode = .serial
+    ) {
         self.modelURL = modelURL
         self.storageType = storageType
+        self.concurrencyMode = concurrencyMode
     }
 }

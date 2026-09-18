@@ -27,6 +27,10 @@ open class HistoryTrackingTestCase: XCTestCase {
     /// for tests to inspect it. The service's observer still merges and re-posts normally.
     public static let phantomCleanerTarget = "history-tests.phantom-target"
 
+    /// Context topology of the main service. Subclasses override to run the same cases in
+    /// ``CoreDataConcurrencyMode/concurrent(readerConcurrency:)``.
+    open class var concurrencyMode: CoreDataConcurrencyMode { .serial }
+
     public private(set) var databaseName: String!
     public private(set) var sharedContainerName: String!
     public private(set) var databaseService: CoreDataServiceProtocol!
@@ -45,7 +49,8 @@ open class HistoryTrackingTestCase: XCTestCase {
             databaseName: databaseName,
             transactionAuthor: HistoryTestAuthors.defaultTest,
             targets: [HistoryTestAuthors.defaultTest, Self.phantomCleanerTarget],
-            sharedContainerName: sharedContainerName
+            sharedContainerName: sharedContainerName,
+            concurrencyMode: Self.concurrencyMode
         )
         databaseService = CoreDataService(configuration: configuration)
         repository = Self.makeFeedRepository(for: databaseService)
