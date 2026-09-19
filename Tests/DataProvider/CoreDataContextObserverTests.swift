@@ -232,6 +232,107 @@ class CoreDataContextObserverTests: XCTestCase {
         }
     }
 
+    /// A legacy ``performAsync`` block can leave changes the writer has not committed. What an observable
+    /// delivers must be the state the save actually committed, never those pending values — a later
+    /// rollback would discard them and leave the subscriber holding something that never existed.
+    func testDeliveredStateIsCommittedWhenWriterLeavesPendingChanges() {
+        let feed = createRandomFeed(in: .default)
+        _ = performSaveOperation(with: [feed], deletedIds: [])
+
+        let observable = CoreDataContextObservable(
+            service: Self.facade.databaseService,
+            mapper: repository.dataMapper,
+            predicate: { _ in true }
+        )
+
+        let started = XCTestExpectation()
+        observable.start { error in
+            XCTAssertNil(error)
+            started.fulfill()
+        }
+        wait(for: [started], timeout: Constants.expectationDuration)
+
+        let token = NSObject()
+        let delivered = XCTestExpectation()
+        delivered.assertForOverFulfill = false
+        var names: [String] = []
+
+        observable.addObserver(token, deliverOn: .main) { changes in
+            for case .update(let item) in changes {
+                names.append(item.name)
+            }
+
+            delivered.fulfill()
+        }
+
+        let mutated = XCTestExpectation()
+
+        Self.facade.databaseService.performAsync { optionalContext, _ in
+            defer { mutated.fulfill() }
+
+            guard let context = optionalContext else {
+                return XCTFail("no context")
+            }
+
+            let request = NSFetchRequest<CDFeed>(entityName: "CDFeed")
+            request.predicate = NSPredicate(format: "identifier == %@", feed.identifier)
+
+            guard let entity = try? context.fetch(request).first else {
+                return XCTFail("feed not found")
+            }
+
+            entity.name = "saved"
+            try? context.save()
+
+            // Left uncommitted on purpose: this value must never be delivered.
+            entity.name = "pending"
+        }
+
+        wait(for: [mutated, delivered], timeout: Constants.expectationDuration)
+
+        XCTAssertEqual(names, ["saved"], "observable delivered an uncommitted value")
+    }
+
+    /// The delivery must be queued before the write's completion runs, so a completion that unsubscribes
+    /// does not drop the very change it is reacting to.
+    func testChangeDeliveredWhenObserverRemovedInWriteCompletion() {
+        guard case .serial = Self.facade.databaseService.configuration.concurrencyMode else {
+            // Concurrent resolves on its own context, so this ordering is a race there, not a guarantee.
+            return
+        }
+
+        let observable = CoreDataContextObservable(
+            service: Self.facade.databaseService,
+            mapper: repository.dataMapper,
+            predicate: { _ in true }
+        )
+
+        let started = XCTestExpectation()
+        observable.start { _ in started.fulfill() }
+        wait(for: [started], timeout: Constants.expectationDuration)
+
+        let token = NSObject()
+        let delivered = XCTestExpectation()
+        delivered.assertForOverFulfill = false
+        var received: [DataProviderChange<FeedData>] = []
+
+        observable.addObserver(token, deliverOn: .main) { changes in
+            received.append(contentsOf: changes)
+            delivered.fulfill()
+        }
+
+        let feed = createRandomFeed(in: .default)
+
+        // A nil queue runs the completion inline on the writer, right after the save that notified us.
+        repository.save(updating: [feed], deleting: [], runCompletionIn: nil) { _ in
+            observable.removeObserver(token)
+        }
+
+        wait(for: [delivered], timeout: Constants.expectationDuration)
+
+        XCTAssertEqual(received.count, 1, "the change was dropped by the removal in the completion")
+    }
+
     // MARK: Private
 
     private func performTest(updateObjects: [FeedData],

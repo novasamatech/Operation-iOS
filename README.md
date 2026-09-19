@@ -29,8 +29,10 @@ pod 'Operation-iOS', :git => 'https://github.com/novasamatech/Operation-iOS.git'
 | `performWithObserver(block:)` | writer | Delivers the writer and the observer context together, for components that register for the writer's saves and resolve them on the observer. |
 
 `CoreDataRepository` routes fetches to `performRead` and saves to `performWrite`. `CoreDataContextObservable`
-reduces the writer's did-save payload to object identifiers and maps on the observer context, so a save never
-waits for mapping; persistent-history re-posts from other processes take the same path.
+reduces the writer's did-save payload to object identifiers; persistent-history re-posts from other processes
+take the same path. In `.concurrent` mode it then maps on the separate observer context, so a save never waits
+for mapping. In `.serial` mode the observer is the writer, so mapping runs inline inside the save — deferring
+it there would only expose changes the writer commits later.
 
 Because that hop is asynchronous, an observable delivers the row's committed state at delivery time rather than
 a snapshot of the commit that triggered it. Every delivered state is a committed one and the last delivery always

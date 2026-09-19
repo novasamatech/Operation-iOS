@@ -9,13 +9,17 @@ import CoreData
  *  Changes can be filtered by providing predicate closure during initialization.
  *
  *  The writer's ```NSManagedObjectContextDidSave``` payload is reduced to object identifiers on the
- *  writer's queue; resolving, filtering and mapping happen on the service's observer context, so the
- *  save never waits for mapping. Because that hop is asynchronous, each change is derived from the row's
- *  committed state at resolve time (see ```resolve```), not from the category the notification filed it
- *  under. Payloads carrying ```NSManagedObjectID``` values (persistent history re-posts from other
- *  processes) take the same path for inserts and updates; remote deletes are delivered from the
- *  tombstones ```CoreDataHistoryObserver``` forwards, which requires ```preserveAfterDeletion``` on the
- *  identifier attribute of the entity.
+ *  writer's queue. In ```.concurrent``` mode resolving, filtering and mapping then happen on the service's
+ *  separate observer context, so the save never waits for mapping; because that hop is asynchronous, each
+ *  change is derived from the row's committed state at resolve time (see ```resolve```), not from the
+ *  category the notification filed it under. In ```.serial``` mode the observer *is* the writer, so that
+ *  hop would only defer the work past later mutations on the same context: resolution runs inline inside
+ *  the save instead, where the committed state is exactly what the context holds.
+ *
+ *  Payloads carrying ```NSManagedObjectID``` values (persistent history re-posts from other processes)
+ *  take the same path for inserts and updates; remote deletes are delivered from the tombstones
+ *  ```CoreDataHistoryObserver``` forwards, which requires ```preserveAfterDeletion``` on the identifier
+ *  attribute of the entity.
  */
 
 final public class CoreDataContextObservable<T: Identifiable, U: NSManagedObject> {
@@ -82,25 +86,35 @@ final public class CoreDataContextObservable<T: Identifiable, U: NSManagedObject
         schedule(pending, from: notification.object as? NSManagedObjectContext, on: observerContext)
     }
 
-    /// Runs on the writer's queue. Hands ```pending``` to the observer context for resolution.
+    /// Runs on the writer's queue. Resolves ```pending``` against the observer context.
     private func schedule(_ pending: PendingChanges, from source: NSManagedObjectContext?, on observerContext: NSManagedObjectContext) {
         // The writer's registered objects are the source of truth; refreshing them would discard changes a
         // legacy block still intends to save. Any other observer context is re-faulted to the store.
         let refreshes = observerContext !== source
 
-        observerContext.perform { [weak self] in
-            guard let self else {
-                return
-            }
-
-            let changes = self.resolve(pending, in: observerContext, refreshing: refreshes)
-
-            guard !changes.isEmpty else {
-                return
-            }
-
-            self.deliver(changes)
+        guard refreshes else {
+            // ```.serial```: the observer *is* the writer and this runs inside the save that posted the
+            // notification, where the context holds exactly what was just committed. Resolving here keeps
+            // the delivered state committed — hopping would defer it past mutations a legacy block makes
+            // after its ```save()```. It also queues the delivery before the write's completion runs, so a
+            // completion that unsubscribes cannot drop the change it is reacting to.
+            resolveAndDeliver(pending, in: observerContext, refreshing: false)
+            return
         }
+
+        observerContext.perform { [weak self] in
+            self?.resolveAndDeliver(pending, in: observerContext, refreshing: true)
+        }
+    }
+
+    private func resolveAndDeliver(_ pending: PendingChanges, in context: NSManagedObjectContext, refreshing: Bool) {
+        let changes = resolve(pending, in: context, refreshing: refreshing)
+
+        guard !changes.isEmpty else {
+            return
+        }
+
+        deliver(changes)
     }
 }
 
