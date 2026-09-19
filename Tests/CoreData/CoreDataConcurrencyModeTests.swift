@@ -154,16 +154,19 @@ final class CoreDataConcurrencyModeTests: XCTestCase {
         }
     }
 
-    func testCloseWaitsForQueuedReads() throws {
+    /// ``close()`` waits for reads to release the store, which is what makes tearing the coordinator down
+    /// safe. It deliberately does not wait for their completions: those run after the reading context is
+    /// done with and are allowed to re-enter the service, so waiting for them would wait for a completion
+    /// that closes the service.
+    func testCloseWaitsForQueuedReadsToReleaseTheStore() throws {
         forEachMode { service, mode in
             let order = CompletionOrder()
 
             for index in 0 ..< 5 {
                 service.performRead({ _ in
                     Thread.sleep(forTimeInterval: 0.05)
-                }, completion: { _ in
                     order.append("read-\(index)")
-                })
+                }, completion: { _ in })
             }
 
             do {
@@ -172,7 +175,7 @@ final class CoreDataConcurrencyModeTests: XCTestCase {
                 XCTFail("\(mode): close threw \(error)")
             }
 
-            XCTAssertEqual(order.values.count, 5, "\(mode): close returned before every queued read completed")
+            XCTAssertEqual(order.values.count, 5, "\(mode): close returned while a queued read still held the store")
             XCTAssertNil(service.context, mode)
         }
     }
@@ -311,8 +314,136 @@ extension CoreDataConcurrencyModeTests {
         }
     }
 
-    func testReadDiscardsChangesLeftOnContext() {
+    /// A completion is done with the reading context, so tearing the service down from one must work.
+    func testCloseFromReadCompletionReturns() {
+        forEachMode(tracked: false) { service, mode in
+            let closed = expectation(description: "close returned from read completion in \(mode)")
+            let didClose = Flag()
+
+            service.performRead({ _ in }, completion: { _ in
+                do {
+                    try service.close()
+                    didClose.set()
+                } catch {
+                    XCTFail("\(mode): close threw \(error)")
+                }
+
+                closed.fulfill()
+            })
+
+            wait(for: [closed], timeout: 5)
+            XCTAssertNil(service.context, "\(mode): store was not closed")
+
+            // A close that never returned still owns the reader; touching the service again would hang the suite.
+            if didClose.isSet {
+                try? service.drop()
+            }
+        }
+    }
+
+    /// A read block still holds the store, so it cannot wait for itself. Report it instead of hanging.
+    func testCloseFromReadBlockIsRejected() {
+        forEachMode(tracked: false) { service, mode in
+            guard mode == "concurrent" else {
+                // Serial reads run on the writer, where ``performAndWait`` is reentrant and close still works.
+                return
+            }
+
+            let done = expectation(description: "read block ran in \(mode)")
+            let thrown = ErrorBox()
+
+            service.performRead({ _ in
+                do {
+                    try service.close()
+                } catch {
+                    thrown.set(error)
+                }
+            }, completion: { _ in done.fulfill() })
+
+            wait(for: [done], timeout: 5)
+
+            guard case CoreDataServiceError.closeFromReadBlock? = thrown.value else {
+                return XCTFail("\(mode): expected closeFromReadBlock, got \(String(describing: thrown.value))")
+            }
+
+            do {
+                try service.close()
+            } catch {
+                XCTFail("\(mode): close threw \(error)")
+            }
+
+            try? service.drop()
+        }
+    }
+
+    func testWorkArrivingDuringCloseIsRejected() {
+        forEachMode(tracked: false) { service, mode in
+            let closed = beginCloseWhileWriterIsBusy(service, mode)
+
+            let rejected = expectation(description: "read rejected in \(mode)")
+            service.performRead({ _ in }, completion: { result in
+                guard case .failure(let error) = result,
+                      case CoreDataServiceError.closeInProgress = error else {
+                    return XCTFail("\(mode): expected closeInProgress, got \(result)")
+                }
+                rejected.fulfill()
+            })
+
+            wait(for: [rejected, closed], timeout: 5)
+
+            XCTAssertNil(service.context, "\(mode): store was reopened while closing")
+            try? service.drop()
+        }
+    }
+
+    /// ``drop()`` gates on the store being closed; a close that is still draining is not closed yet.
+    func testDropDuringCloseIsRejected() {
+        forEachMode(tracked: false) { service, mode in
+            let closed = beginCloseWhileWriterIsBusy(service, mode)
+
+            do {
+                try service.drop()
+                XCTFail("\(mode): drop succeeded while the store was still draining")
+            } catch CoreDataServiceError.closeInProgress {
+                // expected
+            } catch {
+                XCTFail("\(mode): expected closeInProgress, got \(error)")
+            }
+
+            wait(for: [closed], timeout: 5)
+            try? service.drop()
+        }
+    }
+
+    /// A second ``close()`` must not report success while the first is still draining.
+    func testSecondCloseDuringDrainIsRejected() {
+        forEachMode(tracked: false) { service, mode in
+            let closed = beginCloseWhileWriterIsBusy(service, mode)
+
+            do {
+                try service.close()
+                XCTFail("\(mode): second close reported success while the first was still draining")
+            } catch CoreDataServiceError.closeInProgress {
+                // expected
+            } catch {
+                XCTFail("\(mode): expected closeInProgress, got \(error)")
+            }
+
+            wait(for: [closed], timeout: 5)
+            try? service.drop()
+        }
+    }
+
+    /// Only ```.serial``` can be asserted here. Its reads run on the writer, where a change left behind
+    /// would join the next transaction, so the rollback is load-bearing and observable. A ```.concurrent```
+    /// read runs on a throwaway context that is never saved, so there is nothing to roll back; leaving a
+    /// change there trips an ```assert``` in ```performRead``` instead, which a test cannot catch.
+    func testSerialReadRollsBackChangesLeftOnWriter() {
         forEachMode { service, mode in
+            guard mode == "serial" else {
+                return
+            }
+
             let identifier = UUID().uuidString
             write(in: service) { Self.insertFeed(identifier: identifier, name: "original", in: $0) }
 
@@ -430,6 +561,23 @@ private extension CoreDataConcurrencyModeTests {
         }
     }
 
+    final class ErrorBox {
+        private let lock = NSLock()
+        private var storage: Error?
+
+        var value: Error? {
+            lock.lock()
+            defer { lock.unlock() }
+            return storage
+        }
+
+        func set(_ error: Error) {
+            lock.lock()
+            storage = error
+            lock.unlock()
+        }
+    }
+
     final class CompletionOrder {
         private let lock = NSLock()
         private var storage: [String] = []
@@ -473,6 +621,29 @@ private extension CoreDataConcurrencyModeTests {
 
             body(service, name)
         }
+    }
+
+    /// Occupies the writer, then starts a ``close()`` on another thread and returns once it is draining.
+    /// The returned expectation is fulfilled when that close returns.
+    func beginCloseWhileWriterIsBusy(_ service: CoreDataService, _ mode: String) -> XCTestExpectation {
+        service.performWrite({ context in
+            Thread.sleep(forTimeInterval: 0.3)
+            Self.insertFeed(identifier: UUID().uuidString, name: "in-flight", in: context)
+        }, completion: { _ in })
+
+        Thread.sleep(forTimeInterval: 0.05)
+
+        let closed = expectation(description: "close returned in \(mode)")
+
+        DispatchQueue.global().async {
+            try? service.close()
+            closed.fulfill()
+        }
+
+        // Let close() detach the store and start draining the busy writer.
+        Thread.sleep(forTimeInterval: 0.05)
+
+        return closed
     }
 
     static func makeRepository(for service: CoreDataService) -> CoreDataRepository<FeedData, CDFeed> {

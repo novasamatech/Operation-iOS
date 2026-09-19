@@ -189,12 +189,13 @@ public protocol CoreDataServiceProtocol {
     /**
      *  Runs ```block``` as a one-shot read. In ```.concurrent``` mode it executes on a short-lived sibling
      *  context that is discarded as soon as the block returns and may overlap other reads and the writer.
-     *  Changes left on the context are discarded in every mode.
+     *  In ```.serial``` mode the read shares the writer, so a change it leaves behind is rolled back.
      *
      *  - important: The value returned from ```block``` and anything the completion captures must be plain
      *  values, never ```NSManagedObject``` instances: in ```.concurrent``` mode their context no longer
-     *  exists by the time the completion runs. The completion runs on the reading context's queue, so
-     *  blocking there on another read can exhaust the bounded reader pool.
+     *  exists by the time the completion runs. In ```.concurrent``` mode a block that leaves changes on the
+     *  reader traps in debug builds: the reader is thrown away unsaved, so the change is silently lost.
+     *  ```block``` must not call ```close()``` — it still holds the store that call would wait for.
      */
     func performRead<T>(_ block: @escaping CoreDataContextBlock<T>, completion: @escaping CoreDataResultBlock<T>)
 
@@ -212,15 +213,23 @@ public protocol CoreDataServiceProtocol {
 
     /**
      *  Closes Core Data store after queued work has drained. Work that reaches the service while it is
-     *  draining, or after it returned, opens the store again on demand.
+     *  still draining is rejected with ```CoreDataServiceError.closeInProgress```; work arriving after this
+     *  returns opens the store again on demand. A read's completion may close the service; a read's block
+     *  may not.
+     *
+     *  - note: This waits for reads to release the store, not for their completions to run. A completion
+     *  is allowed to re-enter the service, so waiting for one could wait for a completion that is itself
+     *  closing. A read completion may therefore still be pending when this returns; it no longer touches
+     *  the store by then, so dropping is safe.
      */
     func close() throws
 
     /**
      *  Removes Core Data store.
      *
-     *  - note: Core Data store must be closed before calling this function. See ```close``` method for
-     *  more details.
+     *  - note: Core Data store must be closed before calling this function, and a ```close()``` that is
+     *  still draining does not count as closed: dropping then throws
+     *  ```CoreDataServiceError.closeInProgress```. See ```close``` method for more details.
      */
     func drop() throws
 }

@@ -13,6 +13,10 @@ struct CoreDataContextRoles {
     let observer: NSManagedObjectContext
     let readerQueue: OperationQueue?
 
+    /// Counts the reads currently holding the store. Shared by every copy of these roles and replaced
+    /// when the store is reopened, so it only ever tracks reads against this coordinator.
+    let readerActivity = CoreDataReaderActivity()
+
     var allContexts: [NSManagedObjectContext] {
         writer === observer ? [writer] : [writer, observer]
     }

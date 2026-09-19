@@ -23,7 +23,7 @@ pod 'Operation-iOS', :git => 'https://github.com/novasamatech/Operation-iOS.git'
 | Entry point | Context | Contract |
 |---|---|---|
 | `performWrite(_:completion:)` | writer | One transaction: saved when the block leaves changes, rolled back when it throws. Serialized in call order. |
-| `performRead(_:completion:)` | reader | One-shot read that may overlap the writer and other reads. Changes left on the context are discarded. Return plain values only: in `.concurrent` mode the reader context is gone when the completion runs, and the completion runs on the reader's queue. |
+| `performRead(_:completion:)` | reader | One-shot read that may overlap the writer and other reads. Return plain values only: in `.concurrent` mode the reader context is gone when the completion runs. A `.serial` read shares the writer, so a change it leaves is rolled back; a `.concurrent` read runs on a throwaway context and traps in debug builds if it leaves one. |
 | `performObserve(block:)` | observer | Long-lived observation (fetched results controllers, change observers). Never reset while open. |
 | `performAsync(block:)` | writer | Legacy entry point; the block owns `save()` / `rollback()`. |
 | `performWithObserver(block:)` | writer | Delivers the writer and the observer context together, for components that register for the writer's saves and resolve them on the observer. |
@@ -49,8 +49,17 @@ persistent-history tombstones. Mark the identifier attribute with **Preserve Aft
 are delivered.
 
 `close()` detaches the store, then drains queued reads, writes and observer work with the lock released, so a
-completion or observer that calls back into the service cannot deadlock it. Work arriving during or after
-`close()` opens the store again on demand.
+completion or observer that calls back into the service cannot deadlock it. A read's *completion* may close the
+service — it is already finished with the reading context. A read's *block* may not: it still holds the store
+that the close would wait for, so such a call is rejected with `closeFromReadBlock`. The flip side is that
+`close()` waits for reads to release the store rather than for their completions to run, so a read completion
+may still be pending when it returns. That completion no longer touches the store, so a following `drop()` is
+still safe.
+
+While a `close()` is draining the service is neither open nor closed. Work arriving in that window is rejected
+with `closeInProgress` rather than opening a second store on the same file, a second `close()` is rejected the
+same way rather than reporting success over a drain that is still running, and `drop()` is rejected because the
+file is still in use. Work arriving after `close()` returns opens the store again on demand.
 
 Conformers of `CoreDataServiceProtocol` that only implement `performAsync`, `close` and `drop` get
 `performWrite`, `performRead`, `performObserve` and `performWithObserver` from protocol defaults with `.serial`

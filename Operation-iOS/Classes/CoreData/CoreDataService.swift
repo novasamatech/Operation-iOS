@@ -27,6 +27,14 @@ public enum CoreDataServiceError: Error {
 
     /// A context was requested but none was delivered and no other error explains why.
     case contextUnavailable
+
+    /// ```close()``` was reached while another close is still draining the store. The service is neither
+    /// open nor closed at that point, so work is rejected rather than served by a second store.
+    case closeInProgress
+
+    /// ```close()``` was called from inside a read block, where it could only wait for the read it is
+    /// running on. Close the service from the completion or from another thread instead.
+    case closeFromReadBlock
 }
 
 /**
@@ -48,9 +56,33 @@ public class CoreDataService {
         self.configuration = configuration
     }
 
-    private(set) var roles: CoreDataContextRoles?
+    /// Lifecycle of the store. ```closing``` is neither open nor closed: the roles are detached but their
+    /// queued work is still draining, so arriving work is rejected rather than served by a second store.
+    private enum State {
+        case closed
+        case open(CoreDataContextRoles)
+        case closing
+    }
+
+    private var state: State = .closed
     private var historyObserver: CoreDataHistoryObserver?
     private let lock = NSLock()
+
+    /// The open roles, or ```nil``` while the store is closed or still closing. Internal callers read
+    /// ```state``` directly: this takes the lock and would deadlock under ```withRoles```.
+    var roles: CoreDataContextRoles? {
+        lock.lock()
+
+        defer {
+            lock.unlock()
+        }
+
+        guard case .open(let roles) = state else {
+            return nil
+        }
+
+        return roles
+    }
 
     /// The writer context, or ```nil``` while the store is closed.
     var context: NSManagedObjectContext? {
@@ -90,13 +122,25 @@ extension CoreDataService {
     /// ```close()``` drains the contexts. Bodies must only enqueue asynchronously. Setup errors go to
     /// ```onFailure``` on the caller's thread with the lock released, as a failure completion may call back
     /// into the service.
+    ///
+    /// Work that arrives while a ```close()``` is draining is rejected: opening a second store on the same
+    /// file would leave the close tearing down a store that is no longer the service's, and would let a
+    /// following ```drop()``` delete the file under it.
     func withRoles(onFailure: (Error) -> Void, _ body: (CoreDataContextRoles) -> Void) {
         lock.lock()
 
         let failure: Error?
 
         do {
-            body(try self.roles ?? setup())
+            switch state {
+            case .open(let roles):
+                body(roles)
+            case .closed:
+                body(try setup())
+            case .closing:
+                throw CoreDataServiceError.closeInProgress
+            }
+
             failure = nil
         } catch {
             failure = error
@@ -169,7 +213,7 @@ extension CoreDataService {
             historyTracking: historyTracking
         )
 
-        self.roles = roles
+        self.state = .open(roles)
 
         if let historyTracking {
             let targets = historyTracking.targets.isEmpty
@@ -274,18 +318,33 @@ extension CoreDataService: CoreDataServiceProtocol {
                 return
             }
 
+            // Counted here, under the service lock, so a ```close()``` reaching the lock next still waits
+            // for this read even though its operation has not started.
+            roles.readerActivity.enter()
+
             readerQueue.addOperation {
-                let reader = roles.makeReader()
+                let result: Result<T, Error> = {
+                    defer { roles.readerActivity.leave() }
 
-                reader.performAndWait {
-                    let result = Result { try block(reader) }
+                    let reader = roles.makeReader()
+                    var value: Result<T, Error>!
 
-                    if reader.hasChanges {
-                        reader.rollback()
+                    reader.performAndWait {
+                        value = CoreDataReaderActivity.markingCurrentThread {
+                            Result { try block(reader) }
+                        }
+
+                        // The reader is discarded without saving, so a leftover change cannot reach the
+                        // store. It is still a programmer error, and rolling it back silently hid that.
+                        assert(!reader.hasChanges, "read block left changes on the reader context")
                     }
 
-                    completion(result)
-                }
+                    return value
+                }()
+
+                // Off the reader's queue and after the store is released, so the completion is free to
+                // close the service or start another read.
+                completion(result)
             }
         }
     }
@@ -308,22 +367,46 @@ extension CoreDataService: CoreDataServiceProtocol {
 
     /// Detaches the roles under the lock, then drains them with the lock released: queued work may call back
     /// into the service (a read completion issuing another read, an observable reacting to a save), and those
-    /// calls must find a free lock rather than deadlock. Anything arriving after this point opens a fresh store.
+    /// calls must find a free lock rather than deadlock. Work arriving while the drain is running is rejected
+    /// with ```closeInProgress```; work arriving after this returns opens a fresh store.
+    ///
+    /// - throws: ```closeFromReadBlock``` when called from inside a read block, which still holds the store
+    /// this call would wait for, and ```closeInProgress``` when another close is already draining.
     public func close() throws {
-        lock.lock()
-
-        historyObserver?.stopObserving()
-        historyObserver = nil
-
-        guard let roles else {
-            lock.unlock()
-            return
+        guard !CoreDataReaderActivity.isReadingOnCurrentThread else {
+            throw CoreDataServiceError.closeFromReadBlock
         }
 
-        self.roles = nil
+        lock.lock()
+
+        let roles: CoreDataContextRoles
+
+        switch state {
+        case .closed:
+            lock.unlock()
+            return
+        case .closing:
+            lock.unlock()
+            throw CoreDataServiceError.closeInProgress
+        case .open(let open):
+            roles = open
+            state = .closing
+
+            historyObserver?.stopObserving()
+            historyObserver = nil
+        }
+
         lock.unlock()
 
-        roles.readerQueue?.waitUntilAllOperationsAreFinished()
+        defer {
+            lock.lock()
+            state = .closed
+            lock.unlock()
+        }
+
+        // Reads hold the store only while their block runs; their completions come after and may re-enter
+        // the service, so waiting on the reader queue itself would wait for those too.
+        roles.readerActivity.waitUntilIdle()
 
         // Flush queued transactions first: their did-save notifications enqueue the observer work that the
         // reset below must run after.
@@ -349,8 +432,14 @@ extension CoreDataService: CoreDataServiceProtocol {
             lock.unlock()
         }
 
-        guard roles == nil else {
+        switch state {
+        case .open:
             throw CoreDataServiceError.unexpectedDropWhenOpen
+        case .closing:
+            // Detached but still draining: removing the file now pulls it out from under a live coordinator.
+            throw CoreDataServiceError.closeInProgress
+        case .closed:
+            break
         }
 
         guard case .persistent(let settings) = configuration.storageType else {
