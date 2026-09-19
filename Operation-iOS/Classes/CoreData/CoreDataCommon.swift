@@ -189,13 +189,13 @@ public protocol CoreDataServiceProtocol {
     /**
      *  Runs ```block``` as a one-shot read. In ```.concurrent``` mode it executes on a short-lived sibling
      *  context that is discarded as soon as the block returns and may overlap other reads and the writer.
-     *  In ```.serial``` mode the read shares the writer, so a change it leaves behind is rolled back.
+     *  A read must not mutate: a change the block leaves behind is rolled back and the read fails with
+     *  ```CoreDataServiceError.readLeftChanges``` in every mode, rather than being discarded silently.
      *
      *  - important: The value returned from ```block``` and anything the completion captures must be plain
      *  values, never ```NSManagedObject``` instances: in ```.concurrent``` mode their context no longer
-     *  exists by the time the completion runs. In ```.concurrent``` mode a block that leaves changes on the
-     *  reader traps in debug builds: the reader is thrown away unsaved, so the change is silently lost.
-     *  ```block``` must not call ```close()``` — it still holds the store that call would wait for.
+     *  exists by the time the completion runs. ```block``` must not call ```close()``` — it still holds the
+     *  store that call would wait for.
      */
     func performRead<T>(_ block: @escaping CoreDataContextBlock<T>, completion: @escaping CoreDataResultBlock<T>)
 
@@ -276,7 +276,13 @@ public extension CoreDataServiceProtocol {
             let result = Result { try block(context) }
 
             if wasClean, context.hasChanges {
+                // A read must not mutate: the change would otherwise join the next write's save.
                 context.rollback()
+
+                // A block that threw already has a more informative error than this one.
+                if case .success = result {
+                    return completion(.failure(CoreDataServiceError.readLeftChanges))
+                }
             }
 
             completion(result)

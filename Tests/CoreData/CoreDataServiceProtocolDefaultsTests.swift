@@ -48,6 +48,60 @@ final class CoreDataServiceProtocolDefaultsTests: XCTestCase {
         super.tearDown()
     }
 
+    /// The default ``performRead`` hands out the conformer's single context, so a change a read leaves
+    /// there would join the next write's save. It must be rolled back and reported.
+    func testDefaultReadFailsAndRollsBackWhenBlockLeavesChanges() {
+        let identifier = UUID().uuidString
+
+        let written = expectation(description: "written")
+        service.performWrite({ context in
+            let feed = CDFeed(context: context)
+            feed.identifier = identifier
+            feed.name = "original"
+            feed.status = "new"
+        }, completion: { _ in written.fulfill() })
+        wait(for: [written], timeout: Constants.expectationDuration)
+
+        let mutated = expectation(description: "mutating read reported its changes")
+        service.performRead({ context in
+            let request = NSFetchRequest<CDFeed>(entityName: "CDFeed")
+            request.predicate = NSPredicate(format: "identifier == %@", identifier)
+            try context.fetch(request).first?.name = "mutated"
+        }, completion: { result in
+            defer { mutated.fulfill() }
+
+            guard case .failure(let error) = result,
+                  case CoreDataServiceError.readLeftChanges = error else {
+                return XCTFail("expected readLeftChanges, got \(result)")
+            }
+        })
+        wait(for: [mutated], timeout: Constants.expectationDuration)
+
+        // An unrelated write: if the read's change survived, this transaction commits it too.
+        let second = expectation(description: "unrelated write")
+        service.performWrite({ context in
+            let feed = CDFeed(context: context)
+            feed.identifier = UUID().uuidString
+            feed.name = "unrelated"
+            feed.status = "new"
+        }, completion: { _ in second.fulfill() })
+        wait(for: [second], timeout: Constants.expectationDuration)
+
+        let verified = expectation(description: "read back")
+        var name: String?
+        service.performRead({ context -> String? in
+            let request = NSFetchRequest<CDFeed>(entityName: "CDFeed")
+            request.predicate = NSPredicate(format: "identifier == %@", identifier)
+            return try context.fetch(request).first?.name
+        }, completion: { result in
+            name = (try? result.get()) ?? nil
+            verified.fulfill()
+        })
+        wait(for: [verified], timeout: Constants.expectationDuration)
+
+        XCTAssertEqual(name, "original")
+    }
+
     func testDefaultWriteSavesAndDefaultReadSeesIt() {
         let identifier = UUID().uuidString
 

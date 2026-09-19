@@ -280,20 +280,36 @@ extension CoreDataConcurrencyModeTests {
         }
     }
 
+    /// A read completion re-enters the service while ``close()`` is draining. The close must still return,
+    /// and the re-entrant read must be rejected rather than open a second store behind it. The slow write
+    /// holds the drain open past the moment the completion re-enters, so the outcome is not a race.
     func testCloseCompletesWhenReadCompletionReentersService() {
         forEachMode(tracked: false) { service, mode in
+            service.performWrite({ context in
+                Thread.sleep(forTimeInterval: 0.6)
+                Self.insertFeed(identifier: UUID().uuidString, name: "in-flight", in: context)
+            }, completion: { _ in })
+
             let nested = expectation(description: "nested read completed in \(mode)")
+            let nestedError = ErrorBox()
 
             service.performRead({ _ in
-                Thread.sleep(forTimeInterval: 0.3)
+                Thread.sleep(forTimeInterval: 0.1)
             }, completion: { _ in
-                service.performRead({ _ in }, completion: { _ in nested.fulfill() })
+                service.performRead({ _ in }, completion: { result in
+                    if case .failure(let error) = result {
+                        nestedError.set(error)
+                    }
+
+                    nested.fulfill()
+                })
             })
 
             Thread.sleep(forTimeInterval: 0.05)
 
             let closed = expectation(description: "close returned in \(mode)")
             let didClose = Flag()
+
             DispatchQueue.global().async {
                 do {
                     try service.close()
@@ -301,15 +317,28 @@ extension CoreDataConcurrencyModeTests {
                 } catch {
                     XCTFail("\(mode): close threw \(error)")
                 }
+
                 closed.fulfill()
             }
 
             wait(for: [closed, nested], timeout: 5)
 
-            // A close that never returned still holds the lock; touching the service again would hang the suite.
+            if case CoreDataServiceError.closeInProgress? = nestedError.value {
+                // expected: the drain was still running when the completion re-entered
+            } else {
+                XCTFail("\(mode): re-entrant read was not rejected, got \(String(describing: nestedError.value))")
+            }
+
+            XCTAssertNil(service.context, "\(mode): the re-entrant read opened a second store")
+
+            // No second close: the rejected read left nothing open. A close that never returned still holds
+            // the store, so only touch the service when it did return.
             if didClose.isSet {
-                try? service.close()
-                try? service.drop()
+                do {
+                    try service.drop()
+                } catch {
+                    XCTFail("\(mode): drop after close threw \(error)")
+                }
             }
         }
     }
@@ -434,22 +463,42 @@ extension CoreDataConcurrencyModeTests {
         }
     }
 
-    /// Only ```.serial``` can be asserted here. Its reads run on the writer, where a change left behind
-    /// would join the next transaction, so the rollback is load-bearing and observable. A ```.concurrent```
-    /// read runs on a throwaway context that is never saved, so there is nothing to roll back; leaving a
-    /// change there trips an ```assert``` in ```performRead``` instead, which a test cannot catch.
-    func testSerialReadRollsBackChangesLeftOnWriter() {
+    func testReadLeavingChangesFails() {
         forEachMode { service, mode in
-            guard mode == "serial" else {
-                return
-            }
-
             let identifier = UUID().uuidString
             write(in: service) { Self.insertFeed(identifier: identifier, name: "original", in: $0) }
 
-            read(in: service) { context in
+            let done = expectation(description: "read reported its changes in \(mode)")
+
+            service.performRead({ context in
                 try Self.fetchFeed(identifier, in: context).name = "mutated"
-            }
+            }, completion: { result in
+                defer { done.fulfill() }
+
+                guard case .failure(let error) = result,
+                      case CoreDataServiceError.readLeftChanges = error else {
+                    return XCTFail("\(mode): expected readLeftChanges, got \(result)")
+                }
+            })
+
+            wait(for: [done], timeout: Constants.expectationDuration)
+        }
+    }
+
+    /// The property the rollback exists for: in ```.serial``` the read shares the writer, so a change it
+    /// leaves would otherwise be committed by the next unrelated write.
+    func testChangesLeftByReadNeverReachTheStore() {
+        forEachMode { service, mode in
+            let identifier = UUID().uuidString
+            write(in: service) { Self.insertFeed(identifier: identifier, name: "original", in: $0) }
+
+            let done = expectation(description: "mutating read finished in \(mode)")
+            service.performRead({ context in
+                try Self.fetchFeed(identifier, in: context).name = "mutated"
+            }, completion: { _ in done.fulfill() })
+            wait(for: [done], timeout: Constants.expectationDuration)
+
+            write(in: service) { Self.insertFeed(identifier: UUID().uuidString, name: "unrelated", in: $0) }
 
             let name = read(in: service) { try Self.fetchFeed(identifier, in: $0).name }
             XCTAssertEqual(name, "original", mode)

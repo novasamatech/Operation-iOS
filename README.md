@@ -23,7 +23,7 @@ pod 'Operation-iOS', :git => 'https://github.com/novasamatech/Operation-iOS.git'
 | Entry point | Context | Contract |
 |---|---|---|
 | `performWrite(_:completion:)` | writer | One transaction: saved when the block leaves changes, rolled back when it throws. Serialized in call order. |
-| `performRead(_:completion:)` | reader | One-shot read that may overlap the writer and other reads. Return plain values only: in `.concurrent` mode the reader context is gone when the completion runs. A `.serial` read shares the writer, so a change it leaves is rolled back; a `.concurrent` read runs on a throwaway context and traps in debug builds if it leaves one. |
+| `performRead(_:completion:)` | reader | One-shot read that may overlap the writer and other reads. Return plain values only: in `.concurrent` mode the reader context is gone when the completion runs. A read must not mutate: a change left on the context is rolled back and the read fails with `readLeftChanges`, in every mode. |
 | `performObserve(block:)` | observer | Long-lived observation (fetched results controllers, change observers). Never reset while open. |
 | `performAsync(block:)` | writer | Legacy entry point; the block owns `save()` / `rollback()`. |
 | `performWithObserver(block:)` | writer | Delivers the writer and the observer context together, for components that register for the writer's saves and resolve them on the observer. |

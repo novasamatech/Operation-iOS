@@ -35,6 +35,10 @@ public enum CoreDataServiceError: Error {
     /// ```close()``` was called from inside a read block, where it could only wait for the read it is
     /// running on. Close the service from the completion or from another thread instead.
     case closeFromReadBlock
+
+    /// A read block left changes on its context. The changes are rolled back and the read fails: a read
+    /// must not mutate, and in ```.serial``` mode the change would otherwise join the next write's save.
+    case readLeftChanges
 }
 
 /**
@@ -310,7 +314,15 @@ extension CoreDataService: CoreDataServiceProtocol {
                     let result = Result { try block(roles.writer) }
 
                     if wasClean, roles.writer.hasChanges {
+                        // A read must not mutate: the change would otherwise join the next write's save.
+                        // Rolling back is what protects the store; the failure is what tells the caller.
                         roles.writer.rollback()
+
+                        // A block that threw already has a more informative error than this one.
+                        if case .success = result {
+                            completion(.failure(CoreDataServiceError.readLeftChanges))
+                            return
+                        }
                     }
 
                     completion(result)
@@ -334,9 +346,16 @@ extension CoreDataService: CoreDataServiceProtocol {
                             Result { try block(reader) }
                         }
 
-                        // The reader is discarded without saving, so a leftover change cannot reach the
-                        // store. It is still a programmer error, and rolling it back silently hid that.
-                        assert(!reader.hasChanges, "read block left changes on the reader context")
+                        if reader.hasChanges {
+                            // The reader is discarded unsaved either way, but the contract is reported
+                            // identically in both modes so callers see one behaviour.
+                            reader.rollback()
+
+                            // A block that threw already has a more informative error than this one.
+                            if case .success = value {
+                                value = .failure(CoreDataServiceError.readLeftChanges)
+                            }
+                        }
                     }
 
                     return value
