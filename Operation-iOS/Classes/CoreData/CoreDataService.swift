@@ -231,34 +231,54 @@ extension CoreDataService {
             historyTracking: historyTracking
         )
 
-        self.state = .open(roles)
+        // History setup can still throw — a shared container ```UserDefaults``` refuses, for instance.
+        // Everything that can fail happens before the store is published: publishing first would leave the
+        // caller with an error and the service wide open behind it, serving reads from a store whose
+        // history tracking is silently off and which no observable was ever told about.
+        let pendingHistoryObserver: CoreDataHistoryObserver?
 
-        if let historyTracking {
-            let targets = historyTracking.targets.isEmpty
-                ? [historyTracking.transactionAuthor]
-                : historyTracking.targets
+        do {
+            if let historyTracking {
+                let targets = historyTracking.targets.isEmpty
+                    ? [historyTracking.transactionAuthor]
+                    : historyTracking.targets
 
-            let timestampManagers = try targets.map {
-                try CoreDataHistoryTimestampManager(
-                    target: $0,
+                let timestampManagers = try targets.map {
+                    try CoreDataHistoryTimestampManager(
+                        target: $0,
+                        sharedContainer: historyTracking.sharedContainerName
+                    )
+                }
+
+                let currentTimestampManager = try CoreDataHistoryTimestampManager(
+                    target: historyTracking.transactionAuthor,
                     sharedContainer: historyTracking.sharedContainerName
                 )
+
+                pendingHistoryObserver = CoreDataHistoryObserver(
+                    contexts: roles.allContexts,
+                    timestampManager: currentTimestampManager,
+                    cleaner: CoreDataHistoryCleaner(timestampManagers: timestampManagers),
+                    logger: configuration.logger
+                )
+            } else {
+                pendingHistoryObserver = nil
+            }
+        } catch {
+            // Nothing may keep a store the service never published.
+            for store in coordinator.persistentStores {
+                try? coordinator.remove(store)
             }
 
-            let currentTimestampManager = try CoreDataHistoryTimestampManager(
-                target: historyTracking.transactionAuthor,
-                sharedContainer: historyTracking.sharedContainerName
-            )
-
-            let observer = CoreDataHistoryObserver(
-                contexts: roles.allContexts,
-                timestampManager: currentTimestampManager,
-                cleaner: CoreDataHistoryCleaner(timestampManagers: timestampManagers),
-                logger: configuration.logger
-            )
-            observer.startObserving()
-            self.historyObserver = observer
+            throw error
         }
+
+        self.state = .open(roles)
+        self.historyObserver = pendingHistoryObserver
+
+        // Started only once the store is published, so a throw above cannot leave a live remote-change
+        // registration behind a service that still reports itself closed.
+        pendingHistoryObserver?.startObserving()
 
         NotificationCenter.default.post(
             name: .coreDataServiceDidOpen,
@@ -385,9 +405,16 @@ extension CoreDataService: CoreDataServiceProtocol {
                     return value
                 }()
 
-                // Off the reader's queue and after the store is released, so the completion is free to
-                // close the service or start another read.
-                completion(result)
+                // Delivered off the reader pool entirely. Running it here would hold a concurrency slot
+                // for the completion's whole duration, and consumers of this library block in completions
+                // as a matter of course — ```extractNoCancellableResultData``` and
+                // ```addOperations(_:waitUntilFinished:)``` both do. With ```readerConcurrency``` of 1,
+                // which is a legal and documented value, that is a guaranteed deadlock rather than a
+                // slowdown. The configured queue must be concurrent for the same reason; see
+                // ```CoreDataServiceConfigurationProtocol.completionQueue```.
+                self.configuration.completionQueue.async {
+                    completion(result)
+                }
             }
         }
     }

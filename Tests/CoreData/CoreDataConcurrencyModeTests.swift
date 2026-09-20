@@ -271,6 +271,110 @@ final class CoreDataConcurrencyModeTests: XCTestCase {
         }
     }
 
+    /// Where read completions land is the consumer's choice: they routinely do the decoding and hand-off
+    /// work that should not sit on the library's queues at all.
+    func testReadCompletionIsDeliveredOnTheConfiguredQueue() {
+        let key = DispatchSpecificKey<String>()
+        let queue = DispatchQueue(label: "test.completion.queue", attributes: .concurrent)
+        queue.setSpecific(key: key, value: "configured")
+
+        let configuration = CoreDataServiceConfiguration.createDefaultConfigutation(
+            with: Constants.defaultCoreDataModelName,
+            databaseName: "CompletionQueue-\(UUID().uuidString)",
+            incompatibleModelStrategy: .removeStore,
+            concurrencyMode: .concurrent(readerConcurrency: 2),
+            completionQueue: queue
+        )
+
+        let service = CoreDataService(configuration: configuration)
+
+        var observed: String?
+        let done = expectation(description: "read completed")
+
+        service.performRead({ _ in }, completion: { _ in
+            observed = DispatchQueue.getSpecific(key: key)
+            done.fulfill()
+        })
+
+        wait(for: [done], timeout: Constants.expectationDuration)
+
+        XCTAssertEqual(observed, "configured", "the completion did not run on the configured queue")
+
+        try? service.close()
+    }
+
+    /// A read completion must not occupy a reader slot. ``BaseOperation.extractNoCancellableResultData``
+    /// and ``addOperations(_:waitUntilFinished: true)`` — the idioms this library is consumed through —
+    /// block the calling thread, so a completion that waits on further work would hold its slot for the
+    /// duration. With ``readerConcurrency`` of 1, which is legal and documented, that is a guaranteed
+    /// deadlock rather than a slowdown.
+    func testReadCompletionDoesNotHoldAReaderSlot() {
+        let configuration = CoreDataServiceConfiguration.createDefaultConfigutation(
+            with: Constants.defaultCoreDataModelName,
+            databaseName: "ReaderSlot-\(UUID().uuidString)",
+            incompatibleModelStrategy: .removeStore,
+            concurrencyMode: .concurrent(readerConcurrency: 1)
+        )
+
+        let service = CoreDataService(configuration: configuration)
+        let nestedRanWhileBlocked = Flag()
+        let outerReturned = expectation(description: "outer completion returned")
+
+        service.performRead({ _ in }, completion: { _ in
+            let nested = DispatchSemaphore(value: 0)
+
+            service.performRead({ _ in }, completion: { _ in nested.signal() })
+
+            // Recorded here, not after the wait returns: once this completion exits, its operation frees
+            // the slot and the nested read runs — so a check made on the test thread would see it succeed
+            // either way. What matters is whether it ran *while this completion was still blocked*.
+            if nested.wait(timeout: .now() + 3) == .success {
+                nestedRanWhileBlocked.set()
+            }
+
+            outerReturned.fulfill()
+        })
+
+        wait(for: [outerReturned], timeout: 15)
+
+        XCTAssertTrue(
+            nestedRanWhileBlocked.isSet,
+            "the nested read could not run: the blocked completion held the only reader slot"
+        )
+
+        // Closed without dropping: ``drop()`` removes the shared database directory.
+        try? service.close()
+    }
+
+    /// History setup runs after the store is added but can still throw — a shared container that
+    /// ``UserDefaults`` refuses, for instance. The caller is told, so the store must not be left published:
+    /// otherwise every later call succeeds against a store with history tracking silently off, and no
+    /// observable ever receives the open it was waiting to bind to.
+    func testFailedHistorySetupDoesNotLeaveTheStoreOpen() {
+        let configuration = CoreDataServiceConfiguration.createConfigurationWithHistoryTracking(
+            databaseName: "HistorySetupFailure-\(UUID().uuidString)",
+            sharedContainerName: "NSGlobalDomain"
+        )
+
+        let service = CoreDataService(configuration: configuration)
+
+        let failed = expectation(description: "the read reported the setup failure")
+
+        service.performRead({ _ in }, completion: { result in
+            guard case .failure = result else {
+                return XCTFail("expected the read to fail while history setup cannot complete")
+            }
+
+            failed.fulfill()
+        })
+
+        wait(for: [failed], timeout: Constants.expectationDuration)
+
+        XCTAssertNil(service.roles, "a store whose history setup failed was left open")
+
+        try? service.close()
+    }
+
     func testRolesMatchMode() {
         forEachMode { service, mode in
             let opened = expectation(description: "open in \(mode)")

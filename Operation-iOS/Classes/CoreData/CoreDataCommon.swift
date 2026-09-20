@@ -142,12 +142,23 @@ public protocol CoreDataServiceConfigurationProtocol {
     /// Destination for diagnostics the store and its observables cannot raise as errors — a model that
     /// cannot deliver remote deletes, for instance. Defaults to ```nil```, which silences them.
     var logger: SDKLoggerProtocol? { get }
+
+    /// Queue ```performRead``` delivers its completions on. Defaults to a global concurrent queue.
+    ///
+    /// - important: It must be concurrent. Completions in this library routinely block — that is what
+    /// ```extractNoCancellableResultData``` and ```addOperations(_:waitUntilFinished:)``` do — and on a
+    /// serial queue one blocked completion stops every other completion behind it, including the one it is
+    /// waiting for. Delivering here rather than on the reader pool is what keeps a blocked completion from
+    /// holding a reader slot; a serial queue reintroduces the same deadlock one step further out.
+    var completionQueue: DispatchQueue { get }
 }
 
 public extension CoreDataServiceConfigurationProtocol {
     var concurrencyMode: CoreDataConcurrencyMode { .serial }
 
     var logger: SDKLoggerProtocol? { nil }
+
+    var completionQueue: DispatchQueue { .global(qos: .userInitiated) }
 }
 
 /**

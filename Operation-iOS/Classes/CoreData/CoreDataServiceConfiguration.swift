@@ -19,6 +19,9 @@ public struct CoreDataServiceConfiguration: CoreDataServiceConfigurationProtocol
     /// Destination for diagnostics that cannot be surfaced as errors.
     public var logger: SDKLoggerProtocol?
 
+    /// Queue ```performRead``` delivers its completions on. Must be concurrent; see the protocol.
+    public var completionQueue: DispatchQueue
+
     /**
      *  Creates Core Data service configuration.
      *
@@ -32,11 +35,13 @@ public struct CoreDataServiceConfiguration: CoreDataServiceConfigurationProtocol
         modelURL: URL,
         storageType: CoreDataServiceStorageType,
         concurrencyMode: CoreDataConcurrencyMode = .serial,
-        logger: SDKLoggerProtocol? = nil
+        logger: SDKLoggerProtocol? = nil,
+        completionQueue: DispatchQueue = .global(qos: .userInitiated)
     ) {
         self.modelURL = modelURL
         self.storageType = storageType
         self.concurrencyMode = concurrencyMode
         self.logger = logger
+        self.completionQueue = completionQueue
     }
 }

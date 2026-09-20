@@ -13,7 +13,8 @@ extension CoreDataServiceConfiguration {
         with modelName: String,
         databaseName: String,
         incompatibleModelStrategy: IncompatibleModelHandlingStrategy,
-        concurrencyMode: CoreDataConcurrencyMode = .serial
+        concurrencyMode: CoreDataConcurrencyMode = .serial,
+        completionQueue: DispatchQueue = .global(qos: .userInitiated)
     ) -> CoreDataServiceConfiguration {
         let bundle: Bundle
 #if SWIFT_PACKAGE
@@ -34,7 +35,8 @@ extension CoreDataServiceConfiguration {
 
         let configuration = CoreDataServiceConfiguration(modelURL: modelURL!,
                                                          storageType: .persistent(settings: persistentSettings),
-                                                         concurrencyMode: concurrencyMode)
+                                                         concurrencyMode: concurrencyMode,
+                                                         completionQueue: completionQueue)
 
         return configuration
     }
