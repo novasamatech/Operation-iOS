@@ -93,11 +93,6 @@ final public class CoreDataContextObservable<T: Identifiable, U: NSManagedObject
         let refreshes = observerContext !== source
 
         guard refreshes else {
-            // ```.serial```: the observer *is* the writer and this runs inside the save that posted the
-            // notification, where the context holds exactly what was just committed. Resolving here keeps
-            // the delivered state committed — hopping would defer it past mutations a legacy block makes
-            // after its ```save()```. It also queues the delivery before the write's completion runs, so a
-            // completion that unsubscribes cannot drop the change it is reacting to.
             resolveAndDeliver(pending, in: observerContext, refreshing: false)
             return
         }
@@ -223,10 +218,18 @@ private extension CoreDataContextObservable {
         return .delete(deletedIdentifier: identifier)
     }
 
-    /// Materialises the committed rows for ```objectIDs``` with one fetch; rows that are gone are absent from
-    /// the result. When ```refreshing```, the fetch bypasses the coordinator's row cache and overwrites what
-    /// the context last saw, so values come from the store as it is now. The writer skips that: its registered
-    /// objects are the source of truth and may hold changes a legacy block still intends to save.
+    /// Materialises the committed rows for ```objectIDs```; rows that are gone are absent from the result.
+    ///
+    /// When ```refreshing```, the context is not the one that saved, so every row is re-fetched with the
+    /// coordinator's row cache bypassed and what the context last saw overwritten: values come from the
+    /// store as it is now.
+    ///
+    /// Otherwise the context *is* the one that just saved, and this runs inside that save. Every row the
+    /// notification carried is already registered there holding the committed values, so the registry
+    /// answers without touching the store — the writer's registered objects are the source of truth and
+    /// may hold changes a legacy block still intends to save. Persistent-history re-posts carry ids this
+    /// context never registered; those fall through to the fetch, which also keeps the registry a pure
+    /// optimisation rather than a second source of truth.
     func materialize(
         _ objectIDs: [NSManagedObjectID],
         in context: NSManagedObjectContext,
@@ -236,8 +239,28 @@ private extension CoreDataContextObservable {
             return [:]
         }
 
+        var result: [NSManagedObjectID: U] = [:]
+        var missing: [NSManagedObjectID] = []
+
+        if refreshing {
+            missing = objectIDs
+        } else {
+            for objectID in objectIDs {
+                // A deleted row is left to the fetch, which will not return it: gone rows stay absent.
+                if let object = context.registeredObject(for: objectID) as? U, !object.isDeleted {
+                    result[objectID] = object
+                } else {
+                    missing.append(objectID)
+                }
+            }
+        }
+
+        guard !missing.isEmpty else {
+            return result
+        }
+
         let request = NSFetchRequest<U>(entityName: entityName)
-        request.predicate = NSPredicate(format: "SELF IN %@", objectIDs)
+        request.predicate = NSPredicate(format: "SELF IN %@", missing)
         request.returnsObjectsAsFaults = false
         request.shouldRefreshRefetchedObjects = refreshing
 
@@ -251,9 +274,11 @@ private extension CoreDataContextObservable {
             context.stalenessInterval = stalenessInterval
         }
 
-        let fetched = (try? context.fetch(request)) ?? []
+        for object in (try? context.fetch(request)) ?? [] where result[object.objectID] == nil {
+            result[object.objectID] = object
+        }
 
-        return Dictionary(fetched.map { ($0.objectID, $0) }, uniquingKeysWith: { first, _ in first })
+        return result
     }
 
     func deliver(_ changes: [DataProviderChange<T>]) {
