@@ -10,11 +10,12 @@ public protocol CoreDataHistoryMerging {
      *  Merges transactions into the context and returns notifications for processed changes.
      *
      *  - parameters:
-     *    - context: The managed object context to merge changes into.
-     *    - transactions: Array of history transactions to merge.
+     *    - contexts: The managed object contexts to merge changes into.
+     *    - transactions: Array of history transactions to merge. Must be called on the queue of the context
+     *      that fetched them: the transactions are bound to it.
      *  - returns: Array of notifications containing object ID changes for each merged transaction.
      */
-    func merge(context: NSManagedObjectContext, transactions: [NSPersistentHistoryTransaction]) -> [Notification]
+    func merge(contexts: [NSManagedObjectContext], transactions: [NSPersistentHistoryTransaction]) -> [Notification]
 }
 
 /**
@@ -34,21 +35,30 @@ public struct CoreDataHistoryMerger: CoreDataHistoryMerging {
     /**
      *  Merges all transactions into the context and returns notifications for each transaction.
      *
+     *  Every transaction is reduced to its notification here, on the caller's queue, because the transaction
+     *  objects belong to the context that fetched them and must not be touched from another. What crosses to
+     *  the other contexts is the resulting ```userInfo``` — plain object identifiers — and
+     *  ```mergeChanges(fromRemoteContextSave:into:)``` hops onto each target context's own queue itself.
+     *
      *  - parameters:
-     *    - context: The managed object context to merge changes into.
+     *    - contexts: The managed object contexts to merge changes into.
      *    - transactions: Array of history transactions to merge.
      *  - returns: Array of notifications containing object ID changes, one per merged transaction.
      */
-    public func merge(context: NSManagedObjectContext, transactions: [NSPersistentHistoryTransaction]) -> [Notification] {
-        var notifications: [Notification] = []
-        
-        transactions.forEach { transaction in
-            guard let userInfo = transaction.objectIDNotification().userInfo else { return }
-            
-            NSManagedObjectContext.mergeChanges(fromRemoteContextSave: userInfo, into: [context])
-            notifications.append(transaction.objectIDNotification())
+    public func merge(
+        contexts: [NSManagedObjectContext],
+        transactions: [NSPersistentHistoryTransaction]
+    ) -> [Notification] {
+        let notifications = transactions.map { $0.objectIDNotification() }
+
+        for notification in notifications {
+            guard let userInfo = notification.userInfo else {
+                continue
+            }
+
+            NSManagedObjectContext.mergeChanges(fromRemoteContextSave: userInfo, into: contexts)
         }
-        
+
         return notifications
     }
 }

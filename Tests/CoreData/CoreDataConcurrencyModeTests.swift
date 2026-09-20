@@ -494,6 +494,47 @@ extension CoreDataConcurrencyModeTests {
         }
     }
 
+    /// ``start`` binds on the writer's queue while ``stop`` is synchronous on the caller's. A stop issued
+    /// before a queued start has run must still win: otherwise the observable comes alive again after the
+    /// consumer has stopped it, and keeps delivering.
+    func testStopBeatsAQueuedStart() {
+        forEachMode(tracked: false) { service, mode in
+            let repository = Self.makeRepository(for: service)
+            let observable = CoreDataContextObservable(
+                service: service,
+                mapper: repository.dataMapper,
+                predicate: { _ in true }
+            )
+
+            // Occupy the writer so the binding work ``start`` enqueues sits behind this block.
+            service.performAsync { _, _ in Thread.sleep(forTimeInterval: 0.4) }
+            Thread.sleep(forTimeInterval: 0.05)
+
+            observable.start { _ in }
+
+            let stopped = expectation(description: "stopped in \(mode)")
+            observable.stop { _ in stopped.fulfill() }
+            wait(for: [stopped], timeout: Constants.expectationDuration)
+
+            let token = NSObject()
+            let delivered = expectation(description: "no delivery after stop in \(mode)")
+            delivered.isInverted = true
+            observable.addObserver(token, deliverOn: .main) { _ in delivered.fulfill() }
+
+            // Queued behind the start body, so by now that body has bound if it was going to.
+            let written = expectation(description: "write in \(mode)")
+            service.performWrite({ context in
+                Self.insertFeed(identifier: UUID().uuidString, name: "after-stop", in: context)
+            }, completion: { _ in written.fulfill() })
+
+            wait(for: [written], timeout: Constants.expectationDuration)
+            wait(for: [delivered], timeout: 1)
+
+            try? service.close()
+            try? service.drop()
+        }
+    }
+
     /// Work arriving after ``close`` opens the store again. An observable bound to the previous writer would
     /// otherwise go silently inert: no error, no callback, just nothing.
     func testObservableObservesAgainAfterReopen() {

@@ -46,6 +46,22 @@ final public class CoreDataContextObservable<T: Identifiable, U: NSManagedObject
     private let bindingLock = NSLock()
     private var binding: Binding?
 
+    /// Bumped by ```stop```. ```start``` binds asynchronously, on the writer's queue, while ```stop``` is
+    /// synchronous on the caller's — so a stop can land while a bind is still queued. The bind carries the
+    /// generation it was scheduled under and is discarded when that no longer matches, which a
+    /// "is anything bound right now" check cannot do: at stop time the answer is legitimately no.
+    private var bindingGeneration: UInt = 0
+
+    private var currentGeneration: UInt {
+        bindingLock.lock()
+
+        defer {
+            bindingLock.unlock()
+        }
+
+        return bindingGeneration
+    }
+
     private var currentBinding: Binding? {
         bindingLock.lock()
 
@@ -129,18 +145,27 @@ final public class CoreDataContextObservable<T: Identifiable, U: NSManagedObject
     }
 
     /// Points the observable at ```writer``` and ```observer```, moving the did-save registration with it.
+    /// Returns whether it bound: a bind scheduled before a ```stop``` is discarded.
+    @discardableResult
     private func bind(
         writer: NSManagedObjectContext,
         observer: NSManagedObjectContext,
-        onlyWhenStarted: Bool
-    ) {
+        onlyWhenStarted: Bool,
+        expecting generation: UInt? = nil
+    ) -> Bool {
         bindingLock.lock()
+
+        if let generation, generation != bindingGeneration {
+            // Stopped, or started again, since this bind was scheduled.
+            bindingLock.unlock()
+            return false
+        }
 
         let previous = binding
 
         if onlyWhenStarted, previous == nil {
             bindingLock.unlock()
-            return
+            return false
         }
 
         binding = Binding(writer: writer, observer: observer)
@@ -149,7 +174,7 @@ final public class CoreDataContextObservable<T: Identifiable, U: NSManagedObject
 
         guard previous?.writer !== writer else {
             // Same writer: only the observer context needed refreshing, the registration still stands.
-            return
+            return true
         }
 
         if let previous {
@@ -166,6 +191,8 @@ final public class CoreDataContextObservable<T: Identifiable, U: NSManagedObject
             name: Notification.Name.NSManagedObjectContextDidSave,
             object: writer
         )
+
+        return true
     }
 
     /// Runs on the writer's queue. Resolves ```pending``` against the observer context.
@@ -418,6 +445,8 @@ extension CoreDataContextObservable: DataProviderRepositoryObservable {
     /// One hop on the writer's queue: registers for its saves and captures the observer context, so a save
     /// issued right after ```start``` is observed and no second service call can race a ```close()```.
     public func start(completionBlock: @escaping (Error?) -> Void) {
+        let generation = currentGeneration
+
         service.performWithObserver { [weak self] writer, observer, error in
             guard let self else {
                 completionBlock(nil)
@@ -429,8 +458,16 @@ extension CoreDataContextObservable: DataProviderRepositoryObservable {
                 return
             }
 
-            self.bind(writer: writer, observer: observer, onlyWhenStarted: false)
-            self.warnIfRemoteDeletesCannotArrive(checking: writer)
+            let bound = self.bind(
+                writer: writer,
+                observer: observer,
+                onlyWhenStarted: false,
+                expecting: generation
+            )
+
+            if bound {
+                self.warnIfRemoteDeletesCannotArrive(checking: writer)
+            }
 
             completionBlock(nil)
         }
@@ -472,6 +509,7 @@ extension CoreDataContextObservable: DataProviderRepositoryObservable {
     /// rather than on a context queue.
     public func stop(completionBlock: @escaping (Error?) -> Void) {
         bindingLock.lock()
+        bindingGeneration &+= 1
         let previous = binding
         binding = nil
         bindingLock.unlock()

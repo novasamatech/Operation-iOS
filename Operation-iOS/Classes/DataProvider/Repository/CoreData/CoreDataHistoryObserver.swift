@@ -158,13 +158,10 @@ private extension CoreDataHistoryObserver {
                 !transactions.isEmpty
             else { return }
 
-            _ = self.merger.merge(context: self.context, transactions: transactions)
-
-            for sibling in self.contexts.dropFirst() {
-                sibling.perform { [merger = self.merger] in
-                    _ = merger.merge(context: sibling, transactions: transactions)
-                }
-            }
+            // One call for every context: the transactions are bound to this queue, so they are reduced to
+            // notifications here and only the identifiers travel. Handing them to another context's queue
+            // would read the same transaction objects from two queues at once.
+            _ = self.merger.merge(contexts: self.contexts, transactions: transactions)
 
             if let lastTimestamp = transactions.last?.timestamp {
                 self.timestampManager.update(to: lastTimestamp)
