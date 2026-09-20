@@ -172,64 +172,65 @@ class CoreDataContextObserverTests: XCTestCase {
         performTest(updateObjects: insertingObjects + updatingObjects, deletedIds: deletingIds, changesValidationBlock: validationBlock)
     }
 
-    func testUpdateLeavingPredicateDeliversDelete() {
+    /// An observable cannot tell "this row left my set" from "this row was never in my set": the payload is
+    /// filtered by entity only, and the predicate sees just the post-change object. It therefore reports
+    /// neither, as 2.x did, rather than guessing a delete for every row another predicate owns.
+    func testUpdateOfRowOutsidePredicateIsNotDelivered() {
         var feed = createRandomFeed(in: .default)
-        feed.favorite = true
-        performSaveOperation(with: [feed], deletedIds: [])
+        feed.favorite = false
+        _ = performSaveOperation(with: [feed], deletedIds: [])
+
+        let outside = CoreDataContextObservable<FeedData, CDFeed>(
+            service: Self.facade.databaseService,
+            mapper: repository.dataMapper,
+            predicate: { $0.favorite }
+        )
+
+        let inside = CoreDataContextObservable<FeedData, CDFeed>(
+            service: Self.facade.databaseService,
+            mapper: repository.dataMapper,
+            predicate: { !$0.favorite }
+        )
+
+        for observable in [outside, inside] {
+            let started = XCTestExpectation()
+            observable.start { error in
+                XCTAssertNil(error)
+                started.fulfill()
+            }
+            wait(for: [started], timeout: Constants.expectationDuration)
+        }
+
+        let outsideToken = NSObject()
+        var outsideChanges: [DataProviderChange<FeedData>] = []
+        let outsideDelivered = XCTestExpectation()
+        outsideDelivered.isInverted = true
+
+        outside.addObserver(outsideToken, deliverOn: .main) { changes in
+            outsideChanges.append(contentsOf: changes)
+            outsideDelivered.fulfill()
+        }
+
+        let insideToken = NSObject()
+        let insideDelivered = XCTestExpectation()
+        insideDelivered.assertForOverFulfill = false
+
+        inside.addObserver(insideToken, deliverOn: .main) { _ in
+            insideDelivered.fulfill()
+        }
 
         var updated = feed
-        updated.favorite = false
+        updated.name = "renamed"
+        _ = performSaveOperation(with: [updated], deletedIds: [])
 
-        let validationBlock: ([DataProviderChange<FeedData>]) -> Bool = { changes in
-            guard changes.count == 1, case .delete(let identifier) = changes[0] else {
-                return false
-            }
+        // The matching observable proves the save landed and was resolved.
+        wait(for: [insideDelivered], timeout: Constants.expectationDuration)
+        wait(for: [outsideDelivered], timeout: 1)
 
-            return identifier == feed.identifier
-        }
-
-        performTest(updateObjects: [updated], deletedIds: [], changesValidationBlock: validationBlock) {
-            ($0 as? CDFeed)?.favorite ?? false
-        }
-    }
-
-    func testInsertThenUpdateLeavingPredicateEndsWithDeleteRepeatedly() {
-        // The race between the second commit and the first resolve is timing-dependent; repeat to expose it.
-        for _ in 0 ..< 15 {
-            testInsertThenUpdateLeavingPredicateEndsWithDelete()
-        }
-    }
-
-    func testInsertThenUpdateLeavingPredicateEndsWithDelete() {
-        var feed = createRandomFeed(in: .default)
-        feed.favorite = true
-
-        var updated = feed
-        updated.favorite = false
-
-        // The insert may resolve before or after the second commit lands, so it arrives as an insert
-        // or is skipped; either way the row must not survive in the subscriber's set.
-        let deliveries = collectDeliveries(saves: [[feed], [updated]], predicateBlock: {
-            ($0 as? CDFeed)?.favorite ?? false
-        }, until: { changes in
-            if case .delete = changes.last { return true } else { return false }
-        })
-
-        XCTAssertTrue((1...2).contains(deliveries.count), "unexpected deliveries: \(deliveries)")
-
-        guard case .delete(let identifier) = deliveries.last?.last else {
-            return XCTFail("expected final delivery to be delete, got \(String(describing: deliveries.last))")
-        }
-
-        XCTAssertEqual(identifier, feed.identifier)
-
-        if deliveries.count == 2 {
-            guard case .insert(let item) = deliveries[0].first else {
-                return XCTFail("expected first delivery to be insert, got \(deliveries[0])")
-            }
-
-            XCTAssertEqual(item, feed)
-        }
+        XCTAssertTrue(
+            outsideChanges.isEmpty,
+            "delivered \(outsideChanges) for a row that never matched this predicate"
+        )
     }
 
     /// A legacy ``performAsync`` block can leave changes the writer has not committed. What an observable

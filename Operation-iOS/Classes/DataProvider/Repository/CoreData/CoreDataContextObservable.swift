@@ -174,11 +174,14 @@ private extension CoreDataContextObservable {
     }
 
     /// Derives every change from the row's committed state at resolve time, not from the category the
-    /// notification filed it under: the hop to the observer context is asynchronous, so later commits may
-    /// already have changed the row. A row that matches is an insert or update. An updated row that no
-    /// longer matches has left the subscriber's set and becomes a delete; an inserted one never entered it,
-    /// so it is skipped. A row that is gone is skipped too, because the save that removed it carries the
-    /// identifier itself.
+    /// notification filed it under: in ```.concurrent``` mode the hop to the observer context is
+    /// asynchronous, so later commits may already have changed the row.
+    ///
+    /// A row that matches the predicate is an insert or update. A row that does not is skipped: the payload
+    /// is filtered by entity alone and the predicate only ever sees the post-change object, so there is no
+    /// way to tell a row that left the subscriber's set from one that was never in it. Reporting a delete
+    /// for both would fire at every observable that shares the entity on every save. A row that is gone is
+    /// skipped too, because the save that removed it carries the identifier itself.
     func resolve(
         _ pending: PendingChanges,
         in context: NSManagedObjectContext,
@@ -203,19 +206,11 @@ private extension CoreDataContextObservable {
     }
 
     func change(for entity: U, inserted: Bool) -> DataProviderChange<T>? {
-        if predicate(entity) {
-            guard let model = try? mapper.transform(entity: entity) else {
-                return nil
-            }
-
-            return inserted ? .insert(newItem: model) : .update(newItem: model)
-        }
-
-        guard !inserted, let identifier = entity.value(forKey: mapper.entityIdentifierFieldName) as? String else {
+        guard predicate(entity), let model = try? mapper.transform(entity: entity) else {
             return nil
         }
 
-        return .delete(deletedIdentifier: identifier)
+        return inserted ? .insert(newItem: model) : .update(newItem: model)
     }
 
     /// Materialises the committed rows for ```objectIDs```; rows that are gone are absent from the result.

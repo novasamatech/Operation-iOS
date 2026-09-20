@@ -40,8 +40,18 @@ reflects the last commit, but back-to-back saves may coalesce intermediate state
 derived from the current row, not from the notification's category:
 
 - the row exists and matches the predicate: `insert` or `update`;
-- an updated row no longer matches the predicate: `delete`, so a subscriber does not keep a stale item;
+- the row does not match the predicate: skipped;
 - the row is gone: skipped, because the save that removed it delivers the `delete` itself.
+
+A row that does not match is skipped rather than reported as a `delete`, as in 2.x. The payload is filtered by
+entity alone and the predicate only sees the post-change row, so an observable cannot tell a row that *left* its
+set from one that was never in it — reporting a `delete` for both would wake every observable sharing the entity
+on every save. The consequence is that a subscriber holding a predicate-filtered collection keeps an item that
+has since stopped matching until it refetches. If you need to be told when a row leaves the set, observe without
+a predicate and filter on your side.
+
+The one exception is a delete from **another process**: a tombstone cannot be evaluated against the predicate, so
+those are delivered for any row of the entity.
 
 Consumers that need every intermediate state must observe the writer directly.
 
