@@ -6,6 +6,20 @@ import CoreData
  *  Core Data service work.
  */
 
+extension Notification.Name {
+    /// Posted by ```CoreDataService``` as it opens a store, with the service as the object and the fresh
+    /// contexts in ```userInfo```. Deliberately internal: it is posted while the service lock is held, so a
+    /// handler that called back into the service would deadlock. Holding the lock is what lets a listener
+    /// rebind before the work that triggered the open is enqueued.
+    static let coreDataServiceDidOpen = Notification.Name("io.novasama.coredata.service.didOpen")
+}
+
+/// ```userInfo``` keys of ```Notification.Name.coreDataServiceDidOpen```.
+enum CoreDataServiceDidOpenKey {
+    static let writer = "io.novasama.coredata.service.writer"
+    static let observer = "io.novasama.coredata.service.observer"
+}
+
 public enum CoreDataServiceError: Error {
     /// Database file can't be created at given url.
     case databaseURLInvalid
@@ -245,6 +259,15 @@ extension CoreDataService {
             observer.startObserving()
             self.historyObserver = observer
         }
+
+        NotificationCenter.default.post(
+            name: .coreDataServiceDidOpen,
+            object: self,
+            userInfo: [
+                CoreDataServiceDidOpenKey.writer: roles.writer,
+                CoreDataServiceDidOpenKey.observer: roles.observer
+            ]
+        )
 
         return roles
     }

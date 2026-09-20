@@ -463,6 +463,76 @@ extension CoreDataConcurrencyModeTests {
         }
     }
 
+    /// ``stop`` only needs the writer it registered against. Routing through the service instead makes it
+    /// open a store purely to unregister from it.
+    func testStopDoesNotReopenClosedService() {
+        forEachMode(tracked: false) { service, mode in
+            let repository = Self.makeRepository(for: service)
+            let observable = CoreDataContextObservable(
+                service: service,
+                mapper: repository.dataMapper,
+                predicate: { _ in true }
+            )
+
+            let started = expectation(description: "observable started in \(mode)")
+            observable.start { _ in started.fulfill() }
+            wait(for: [started], timeout: Constants.expectationDuration)
+
+            do {
+                try service.close()
+            } catch {
+                XCTFail("\(mode): close threw \(error)")
+            }
+
+            let stopped = expectation(description: "observable stopped in \(mode)")
+            observable.stop { _ in stopped.fulfill() }
+            wait(for: [stopped], timeout: Constants.expectationDuration)
+
+            XCTAssertNil(service.context, "\(mode): stop() reopened a closed store")
+
+            try? service.drop()
+        }
+    }
+
+    /// Work arriving after ``close`` opens the store again. An observable bound to the previous writer would
+    /// otherwise go silently inert: no error, no callback, just nothing.
+    func testObservableObservesAgainAfterReopen() {
+        forEachMode(tracked: false) { service, mode in
+            let repository = Self.makeRepository(for: service)
+            let observable = CoreDataContextObservable(
+                service: service,
+                mapper: repository.dataMapper,
+                predicate: { _ in true }
+            )
+
+            let started = expectation(description: "observable started in \(mode)")
+            observable.start { _ in started.fulfill() }
+            wait(for: [started], timeout: Constants.expectationDuration)
+
+            let token = NSObject()
+            let delivered = expectation(description: "change after reopen in \(mode)")
+            delivered.assertForOverFulfill = false
+            observable.addObserver(token, deliverOn: .main) { _ in delivered.fulfill() }
+
+            do {
+                try service.close()
+            } catch {
+                XCTFail("\(mode): close threw \(error)")
+            }
+
+            // The first write after a close opens a fresh store on a new writer.
+            let written = expectation(description: "write after reopen in \(mode)")
+            service.performWrite({ context in
+                Self.insertFeed(identifier: UUID().uuidString, name: "after-reopen", in: context)
+            }, completion: { _ in written.fulfill() })
+
+            wait(for: [written, delivered], timeout: Constants.expectationDuration)
+
+            try? service.close()
+            try? service.drop()
+        }
+    }
+
     func testReadLeavingChangesFails() {
         forEachMode { service, mode in
             let identifier = UUID().uuidString
@@ -730,11 +800,15 @@ private extension CoreDataConcurrencyModeTests {
         return value
     }
 
+    /// Writes a row the mapper can read back. ``status`` and ``domain`` must hold values ``FeedData``
+    /// decodes: a row with neither is invisible to any observable, because ``transform`` throws and the
+    /// change is silently dropped.
     static func insertFeed(identifier: String, name: String, in context: NSManagedObjectContext) {
         let feed = CDFeed(context: context)
         feed.identifier = identifier
         feed.name = name
-        feed.status = "new"
+        feed.domain = Domain.default.rawValue
+        feed.status = FeedDataStatus.open.rawValue
     }
 
     func write(in service: CoreDataService, _ block: @escaping (NSManagedObjectContext) throws -> Void) {

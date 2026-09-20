@@ -17,6 +17,10 @@ import SDKLogger
  *  hop would only defer the work past later mutations on the same context: resolution runs inline inside
  *  the save instead, where the committed state is exactly what the context holds.
  *
+ *  A running observable follows the store across a ```close()``` and the reopen that follows: the service
+ *  hands over its new contexts as it opens, before the work that triggered the open is enqueued. One that was
+ *  never started, or was stopped, is left alone.
+ *
  *  Payloads carrying ```NSManagedObjectID``` values (persistent history re-posts from other processes)
  *  take the same path for inserts and updates; remote deletes are delivered from the tombstones
  *  ```CoreDataHistoryObserver``` forwards, which requires ```preserveAfterDeletion``` on the identifier
@@ -31,10 +35,26 @@ final public class CoreDataContextObservable<T: Identifiable, U: NSManagedObject
 
     private var observers: [RepositoryObserver<T>] = []
 
-    /// Captured on ```start``` and only touched on the writer's queue, where did-save notifications arrive.
-    /// Resolving directly on it keeps notification handling off the service lock, so a ```close()``` that is
-    /// draining the writer can never be re-entered from the writer.
-    private var observerContext: NSManagedObjectContext?
+    /// The contexts ```start``` bound this observable to: the writer whose saves it observes, and the
+    /// context it resolves them on. Guarded rather than confined to the writer's queue, because reopening
+    /// the store replaces both from a different queue than did-save notifications arrive on.
+    private struct Binding {
+        let writer: NSManagedObjectContext
+        let observer: NSManagedObjectContext
+    }
+
+    private let bindingLock = NSLock()
+    private var binding: Binding?
+
+    private var currentBinding: Binding? {
+        bindingLock.lock()
+
+        defer {
+            bindingLock.unlock()
+        }
+
+        return binding
+    }
 
     private var entityName: String { String(describing: U.self) }
 
@@ -67,6 +87,13 @@ final public class CoreDataContextObservable<T: Identifiable, U: NSManagedObject
                 label: "io.novasama.streamableobservable.queue.\(UUID().uuidString)",
                 qos: .utility)
         }
+
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(serviceDidOpen(notification:)),
+            name: .coreDataServiceDidOpen,
+            object: nil
+        )
     }
 
     @objc private func didReceive(notification: Notification) {
@@ -80,11 +107,65 @@ final public class CoreDataContextObservable<T: Identifiable, U: NSManagedObject
             return
         }
 
-        guard let observerContext else {
+        guard let binding = currentBinding else {
             return
         }
 
-        schedule(pending, from: notification.object as? NSManagedObjectContext, on: observerContext)
+        schedule(pending, from: notification.object as? NSManagedObjectContext, on: binding.observer)
+    }
+
+    /// The store was opened — on first use, or again after a ```close()```. An observable that is running
+    /// follows it to the new contexts; one that was never started, or was stopped, stays out of it.
+    @objc private func serviceDidOpen(notification: Notification) {
+        guard
+            (notification.object as AnyObject) === (service as AnyObject),
+            let writer = notification.userInfo?[CoreDataServiceDidOpenKey.writer] as? NSManagedObjectContext,
+            let observer = notification.userInfo?[CoreDataServiceDidOpenKey.observer] as? NSManagedObjectContext
+        else {
+            return
+        }
+
+        bind(writer: writer, observer: observer, onlyWhenStarted: true)
+    }
+
+    /// Points the observable at ```writer``` and ```observer```, moving the did-save registration with it.
+    private func bind(
+        writer: NSManagedObjectContext,
+        observer: NSManagedObjectContext,
+        onlyWhenStarted: Bool
+    ) {
+        bindingLock.lock()
+
+        let previous = binding
+
+        if onlyWhenStarted, previous == nil {
+            bindingLock.unlock()
+            return
+        }
+
+        binding = Binding(writer: writer, observer: observer)
+
+        bindingLock.unlock()
+
+        guard previous?.writer !== writer else {
+            // Same writer: only the observer context needed refreshing, the registration still stands.
+            return
+        }
+
+        if let previous {
+            NotificationCenter.default.removeObserver(
+                self,
+                name: Notification.Name.NSManagedObjectContextDidSave,
+                object: previous.writer
+            )
+        }
+
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(didReceive(notification:)),
+            name: Notification.Name.NSManagedObjectContextDidSave,
+            object: writer
+        )
     }
 
     /// Runs on the writer's queue. Resolves ```pending``` against the observer context.
@@ -334,15 +415,8 @@ extension CoreDataContextObservable: DataProviderRepositoryObservable {
                 return
             }
 
-            self.observerContext = observer
+            self.bind(writer: writer, observer: observer, onlyWhenStarted: false)
             self.warnIfRemoteDeletesCannotArrive(checking: writer)
-
-            NotificationCenter.default.addObserver(
-                self,
-                selector: #selector(didReceive(notification:)),
-                name: Notification.Name.NSManagedObjectContextDidSave,
-                object: writer
-            )
 
             completionBlock(nil)
         }
@@ -378,25 +452,25 @@ extension CoreDataContextObservable: DataProviderRepositoryObservable {
         )
     }
 
+    /// Unregisters from the writer this observable actually registered with, without going through the
+    /// service: asking it for a context would open a closed store purely to unregister from it, and would
+    /// hand back the wrong writer after a reopen. The completion therefore runs on the caller's thread
+    /// rather than on a context queue.
     public func stop(completionBlock: @escaping (Error?) -> Void) {
-        service.performAsync { [weak self] (optionalContext, optionalError) in
-            guard let self else {
-                completionBlock(nil)
-                return
-            }
+        bindingLock.lock()
+        let previous = binding
+        binding = nil
+        bindingLock.unlock()
 
-            if let context = optionalContext {
-                self.observerContext = nil
-
-                NotificationCenter.default.removeObserver(
-                    self,
-                    name: Notification.Name.NSManagedObjectContextDidSave,
-                    object: context
-                )
-            }
-
-            completionBlock(optionalError)
+        if let previous {
+            NotificationCenter.default.removeObserver(
+                self,
+                name: Notification.Name.NSManagedObjectContextDidSave,
+                object: previous.writer
+            )
         }
+
+        completionBlock(nil)
     }
 
     public func addObserver(_ observer: AnyObject,

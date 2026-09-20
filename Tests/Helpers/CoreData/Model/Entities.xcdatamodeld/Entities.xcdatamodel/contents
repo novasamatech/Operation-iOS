@@ -16,7 +16,7 @@
         <attribute name="name" attributeType="String" minValueString="0"/>
         <attribute name="status" attributeType="String" minValueString="0"/>
     </entity>
-    <entity name="CDVideoFeed" representedClassName="CDFeed" parentEntity="CDFeed" syncable="YES"/>
+    <entity name="CDVideoFeed" representedClassName="CDVideoFeed" parentEntity="CDFeed" syncable="YES"/>
     <entity name="CDMessage" representedClassName="CDMessage" syncable="YES" codeGenerationType="class">
         <attribute name="domain" optional="YES" attributeType="String"/>
         <attribute name="identifier" optional="YES" attributeType="String"/>

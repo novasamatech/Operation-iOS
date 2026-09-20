@@ -55,6 +55,17 @@ those are delivered for any row of the entity.
 
 Consumers that need every intermediate state must observe the writer directly.
 
+An observable follows the store across a `close()` and the reopen that follows: the service hands its new
+contexts to every running observable as it opens, before the work that triggered the open is enqueued, so no
+change is missed in the handover. Three details that are not obvious:
+
+- only an observable that is **currently started** follows the store. One that was never started, or was
+  stopped, stays out — reopening the store does not silently bring it back to life;
+- `stop()` is final until an explicit `start()`, and it no longer goes through the service, so it neither
+  opens a closed store to unregister from nor fails while a `close()` is draining. Its completion runs on the
+  caller's thread rather than on a context queue;
+- a `start()` that **failed** — during a close drain, for instance — is not armed for the next open. Retry it.
+
 Unsubscribing does not fence deliveries already in flight. In `.serial` mode a change is queued for delivery
 inside the save that produced it, before any write completion runs, so a completion that calls `removeObserver`
 still receives the change it is reacting to. In `.concurrent` mode resolution hops to the observer context
