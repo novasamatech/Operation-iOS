@@ -16,6 +16,7 @@
         <attribute name="name" attributeType="String" minValueString="0"/>
         <attribute name="status" attributeType="String" minValueString="0"/>
     </entity>
+    <entity name="CDVideoFeed" representedClassName="CDFeed" parentEntity="CDFeed" syncable="YES"/>
     <entity name="CDMessage" representedClassName="CDMessage" syncable="YES" codeGenerationType="class">
         <attribute name="domain" optional="YES" attributeType="String"/>
         <attribute name="identifier" optional="YES" attributeType="String"/>
@@ -30,6 +31,7 @@
         <element name="CDChat" positionX="-54" positionY="63" width="128" height="88"/>
         <element name="CDFeed" positionX="-63" positionY="-18" width="128" height="180"/>
         <element name="CDMessage" positionX="-63" positionY="54" width="128" height="103"/>
+        <element name="CDVideoFeed" positionX="-63" positionY="144" width="128" height="18"/>
         <element name="CDSingleValue" positionX="-63" positionY="54" width="128" height="73"/>
     </elements>
 </model>

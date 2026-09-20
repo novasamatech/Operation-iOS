@@ -148,7 +148,7 @@ private extension CoreDataContextObservable {
 
             let tombstones = userInfo?[CoreDataHistoryObserver.tombstonesKey] as? [CoreDataHistoryTombstone] ?? []
 
-            for tombstone in tombstones where tombstone.objectID.entity.name == entityName {
+            for tombstone in tombstones where Self.isObserved(tombstone.objectID.entity, named: entityName) {
                 // A remote row cannot be filtered by the predicate any more; the identifier is all that survives.
                 if let identifier = tombstone.values[identifierKey] as? String {
                     deletedIdentifiers.append(identifier)
@@ -169,7 +169,26 @@ private extension CoreDataContextObservable {
                 .compactMap { element in
                     (element as? NSManagedObject)?.objectID ?? element as? NSManagedObjectID
                 }
-                .filter { $0.entity.name == entityName }
+                .filter { Self.isObserved($0.entity, named: entityName) }
+        }
+
+        /// A sub-entity's rows belong to the observed entity as well: they inherit its attributes, a fetch
+        /// of the parent returns them, and their instances are of the parent's class — but ```entity.name```
+        /// is always their own, so comparing names drops them. The live-delete path casts the object instead,
+        /// which follows class inheritance for free; an ```NSManagedObjectID``` carries no object to cast, so
+        /// the entity hierarchy is walked here to reach the same answer.
+        private static func isObserved(_ entity: NSEntityDescription, named entityName: String) -> Bool {
+            var current: NSEntityDescription? = entity
+
+            while let candidate = current {
+                if candidate.name == entityName {
+                    return true
+                }
+
+                current = candidate.superentity
+            }
+
+            return false
         }
     }
 

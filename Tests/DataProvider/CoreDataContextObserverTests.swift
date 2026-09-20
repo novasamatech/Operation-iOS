@@ -334,6 +334,63 @@ class CoreDataContextObserverTests: XCTestCase {
         XCTAssertEqual(received.count, 1, "the change was dropped by the removal in the completion")
     }
 
+    /// A row of a sub-entity is still a row of the observed entity. ``CDVideoFeed`` inherits ``CDFeed``, so
+    /// its instances are ``CDFeed`` objects, but its ``entity.name`` is its own — selecting the payload by
+    /// exact entity name drops it, while the class check the live-delete path uses does not.
+    func testSubEntityInsertIsDelivered() {
+        let observable = CoreDataContextObservable<FeedData, CDFeed>(
+            service: Self.facade.databaseService,
+            mapper: repository.dataMapper,
+            predicate: { _ in true }
+        )
+
+        let started = XCTestExpectation()
+        observable.start { error in
+            XCTAssertNil(error)
+            started.fulfill()
+        }
+        wait(for: [started], timeout: Constants.expectationDuration)
+
+        let token = NSObject()
+        let delivered = XCTestExpectation(description: "sub-entity change delivered")
+        delivered.assertForOverFulfill = false
+        var received: [DataProviderChange<FeedData>] = []
+
+        observable.addObserver(token, deliverOn: .main) { changes in
+            received.append(contentsOf: changes)
+            delivered.fulfill()
+        }
+
+        let model = createRandomFeed(in: .default)
+        let written = XCTestExpectation(description: "sub-entity row written")
+
+        Self.facade.databaseService.performWrite({ [mapper = repository.dataMapper] context in
+            let object = NSEntityDescription.insertNewObject(forEntityName: "CDVideoFeed", into: context)
+
+            guard let feed = object as? CDFeed else {
+                return XCTFail("CDVideoFeed did not instantiate as CDFeed")
+            }
+
+            // Populated through the mapper so the row carries values ``transform`` can read back; only the
+            // entity differs from what the repository would write.
+            try mapper.populate(entity: feed, from: model, using: context)
+        }, completion: { result in
+            if case .failure(let error) = result {
+                XCTFail("write failed with \(error)")
+            }
+
+            written.fulfill()
+        })
+
+        wait(for: [written, delivered], timeout: Constants.expectationDuration)
+
+        guard case .insert(let item)? = received.first else {
+            return XCTFail("expected an insert for the sub-entity row, got \(received)")
+        }
+
+        XCTAssertEqual(item.identifier, model.identifier)
+    }
+
     // MARK: Private
 
     private func performTest(updateObjects: [FeedData],
