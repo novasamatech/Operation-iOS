@@ -204,6 +204,73 @@ final class CoreDataConcurrencyModeTests: XCTestCase {
         }
     }
 
+    /// ``materialize`` refetches the saved rows with a single unbounded ``SELF IN %@``. This pins that this
+    /// is safe at scale: 40,000 identifiers is well past SQLite's 32766 host-parameter ceiling, so Core Data
+    /// is plainly not binding one parameter per identifier. Checked once at 100,000 as well, which passed in
+    /// about the same wall time — run-to-run variance here is large enough that no per-row cost should be
+    /// read into that, only that the ceiling is not nearby. 40,000 is kept because it already clears the
+    /// parameter limit without tripling the memory spike. It matters because the ``try?`` around that fetch would turn a failure
+    /// into an empty result, dropping every change in the batch in silence.
+    ///
+    /// Concurrent only: serial resolves from the context's registry and never issues the fetch.
+    func testLargeSaveIsFullyDelivered() {
+        forEachMode(tracked: false) { service, mode in
+            guard mode == "concurrent" else {
+                // Serial resolves from the context's own registry and never issues the fetch.
+                return
+            }
+
+            let repository = Self.makeRepository(for: service)
+            let observable = CoreDataContextObservable(
+                service: service,
+                mapper: repository.dataMapper,
+                predicate: { _ in true }
+            )
+
+            let started = expectation(description: "observable started in \(mode)")
+            observable.start { _ in started.fulfill() }
+            wait(for: [started], timeout: Constants.expectationDuration)
+
+            let rowCount = 40_000
+            let received = Counter()
+            let token = NSObject()
+            let delivered = expectation(description: "every row delivered in \(mode)")
+            delivered.assertForOverFulfill = false
+
+            observable.addObserver(token, deliverOn: .main) { changes in
+                received.add(changes.count)
+
+                if received.value >= rowCount {
+                    delivered.fulfill()
+                }
+            }
+
+            let written = expectation(description: "rows written in \(mode)")
+
+            service.performWrite({ context in
+                for index in 0 ..< rowCount {
+                    Self.insertFeed(identifier: "row-\(index)", name: "row-\(index)", in: context)
+                }
+            }, completion: { result in
+                if case .failure(let error) = result {
+                    XCTFail("\(mode): write failed with \(error)")
+                }
+
+                written.fulfill()
+            })
+
+            wait(for: [written], timeout: 180)
+            wait(for: [delivered], timeout: 180)
+
+            XCTAssertEqual(received.value, rowCount, "\(mode): changes were dropped from a large save")
+
+            // Closed but deliberately not dropped: ``drop()`` removes the whole database *directory*, which
+            // every service in this suite shares, so dropping here deletes stores other tests still hold
+            // open. The store is named per-run and another test's drop will clear it.
+            try? service.close()
+        }
+    }
+
     func testRolesMatchMode() {
         forEachMode { service, mode in
             let opened = expectation(description: "open in \(mode)")
@@ -741,6 +808,23 @@ private extension CoreDataConcurrencyModeTests {
         func set() {
             lock.lock()
             value = true
+            lock.unlock()
+        }
+    }
+
+    final class Counter {
+        private let lock = NSLock()
+        private var storage = 0
+
+        var value: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return storage
+        }
+
+        func add(_ amount: Int) {
+            lock.lock()
+            storage += amount
             lock.unlock()
         }
     }
