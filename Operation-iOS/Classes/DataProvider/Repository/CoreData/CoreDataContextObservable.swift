@@ -361,6 +361,18 @@ extension CoreDataContextObservable: DataProviderRepositoryObservable {
         }
     }
 
+    /// Stops delivering to ```observer```.
+    ///
+    /// Removal is ordered against delivery only in ```.serial``` mode. There a change is queued for
+    /// delivery inside the save that produced it, before any write completion runs, so a completion that
+    /// unsubscribes still receives the change it is reacting to.
+    ///
+    /// In ```.concurrent``` mode resolution first hops to the observer context, so a change committed just
+    /// before this call may be queued either side of it: the last delivery before an unsubscribe is not
+    /// guaranteed. Re-subscribing recovers it — ```StreamableProvider``` refetches on ```addObserver``` and
+    /// delivers current state as inserts. Closing the gap would mean capturing the observer list when the
+    /// notification arrives instead of when the delivery runs, which would let an already-removed observer
+    /// receive one final change; that is a worse contract than the one documented here.
     public func removeObserver(_ observer: AnyObject) {
         processingQueue.async {
             self.observers = self.observers.filter { $0.observer != nil && $0.observer !== observer }

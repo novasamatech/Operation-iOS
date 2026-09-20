@@ -55,6 +55,13 @@ those are delivered for any row of the entity.
 
 Consumers that need every intermediate state must observe the writer directly.
 
+Unsubscribing does not fence deliveries already in flight. In `.serial` mode a change is queued for delivery
+inside the save that produced it, before any write completion runs, so a completion that calls `removeObserver`
+still receives the change it is reacting to. In `.concurrent` mode resolution hops to the observer context
+first, so a change committed just before the removal may land on either side of it — the last delivery before
+an unsubscribe is not guaranteed. Re-subscribing recovers it: `StreamableProvider` refetches on `addObserver`
+and delivers current state as inserts.
+
 Rows deleted by another process are gone by the time their history is replayed, so their identifiers come from
 persistent-history tombstones. Mark the identifier attribute with **Preserve After Deletion** in the model editor
 (`preserveAfterDeletion="YES"`) for remote deletes to reach observers; without it only remote inserts and updates
