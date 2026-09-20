@@ -6,6 +6,20 @@ import CoreData
  *  Core Data service work.
  */
 
+extension Notification.Name {
+    /// Posted by ```CoreDataService``` as it opens a store, with the service as the object and the fresh
+    /// contexts in ```userInfo```. Deliberately internal: it is posted while the service lock is held, so a
+    /// handler that called back into the service would deadlock. Holding the lock is what lets a listener
+    /// rebind before the work that triggered the open is enqueued.
+    static let coreDataServiceDidOpen = Notification.Name("io.novasama.coredata.service.didOpen")
+}
+
+/// ```userInfo``` keys of ```Notification.Name.coreDataServiceDidOpen```.
+enum CoreDataServiceDidOpenKey {
+    static let writer = "io.novasama.coredata.service.writer"
+    static let observer = "io.novasama.coredata.service.observer"
+}
+
 public enum CoreDataServiceError: Error {
     /// Database file can't be created at given url.
     case databaseURLInvalid
@@ -21,6 +35,24 @@ public enum CoreDataServiceError: Error {
 
     /// Can't remove incompatible persistent store.
     case incompatibleModelRemoveFailed
+
+    /// ```.concurrent``` mode was configured with fewer than one reader.
+    case invalidReaderConcurrency(Int)
+
+    /// A context was requested but none was delivered and no other error explains why.
+    case contextUnavailable
+
+    /// ```close()``` was reached while another close is still draining the store. The service is neither
+    /// open nor closed at that point, so work is rejected rather than served by a second store.
+    case closeInProgress
+
+    /// ```close()``` was called from inside a read block, where it could only wait for the read it is
+    /// running on. Close the service from the completion or from another thread instead.
+    case closeFromReadBlock
+
+    /// A read block left changes on its context. The changes are rolled back and the read fails: a read
+    /// must not mutate, and in ```.serial``` mode the change would otherwise join the next write's save.
+    case readLeftChanges
 }
 
 /**
@@ -29,12 +61,6 @@ public enum CoreDataServiceError: Error {
  */
 
 public class CoreDataService {
-    enum SetupState {
-        case initial
-        case inprogress
-        case completed
-    }
-
     public let configuration: CoreDataServiceConfigurationProtocol
 
     /**
@@ -48,9 +74,38 @@ public class CoreDataService {
         self.configuration = configuration
     }
 
-    var context: NSManagedObjectContext?
+    /// Lifecycle of the store. ```closing``` is neither open nor closed: the roles are detached but their
+    /// queued work is still draining, so arriving work is rejected rather than served by a second store.
+    private enum State {
+        case closed
+        case open(CoreDataContextRoles)
+        case closing
+    }
+
+    private var state: State = .closed
     private var historyObserver: CoreDataHistoryObserver?
     private let lock = NSLock()
+
+    /// The open roles, or ```nil``` while the store is closed or still closing. Internal callers read
+    /// ```state``` directly: this takes the lock and would deadlock under ```withRoles```.
+    var roles: CoreDataContextRoles? {
+        lock.lock()
+
+        defer {
+            lock.unlock()
+        }
+
+        guard case .open(let roles) = state else {
+            return nil
+        }
+
+        return roles
+    }
+
+    /// The writer context, or ```nil``` while the store is closed.
+    var context: NSManagedObjectContext? {
+        roles?.writer
+    }
 
     func databaseURL(with fileManager: FileManager) -> URL? {
         guard case .persistent(let settings) = configuration.storageType else {
@@ -80,16 +135,51 @@ public class CoreDataService {
 
 // MARK: Internal Invocations logic
 extension CoreDataService {
-    func invoke(block: @escaping CoreDataContextInvocationBlock, in context: NSManagedObjectContext) {
-        context.perform {
-            block(context, nil)
+    /// Resolves the roles under the setup lock, opening the store on first use, and hands them to ```body```
+    /// while the lock is still held, so work ```body``` enqueues is guaranteed to be queued before a later
+    /// ```close()``` drains the contexts. Bodies must only enqueue asynchronously. Setup errors go to
+    /// ```onFailure``` on the caller's thread with the lock released, as a failure completion may call back
+    /// into the service.
+    ///
+    /// Work that arrives while a ```close()``` is draining is rejected: opening a second store on the same
+    /// file would leave the close tearing down a store that is no longer the service's, and would let a
+    /// following ```drop()``` delete the file under it.
+    func withRoles(onFailure: (Error) -> Void, _ body: (CoreDataContextRoles) -> Void) {
+        lock.lock()
+
+        let failure: Error?
+
+        do {
+            switch state {
+            case .open(let roles):
+                body(roles)
+            case .closed:
+                body(try setup())
+            case .closing:
+                throw CoreDataServiceError.closeInProgress
+            }
+
+            failure = nil
+        } catch {
+            failure = error
+        }
+
+        lock.unlock()
+
+        if let failure {
+            onFailure(failure)
         }
     }
 }
 
 // MARK: Internal Setup Logic
 extension CoreDataService {
-    func setup() throws -> NSManagedObjectContext {
+    func setup() throws -> CoreDataContextRoles {
+        if case .concurrent(let readerConcurrency) = configuration.concurrencyMode, readerConcurrency < 1 {
+            // Programmer error: reject before any store is touched, so nothing is created on disk.
+            throw CoreDataServiceError.invalidReaderConcurrency(readerConcurrency)
+        }
+
         let fileManager = FileManager.default
         let optionalDatabaseURL = self.databaseURL(with: fileManager)
         let storageType: String
@@ -119,16 +209,9 @@ extension CoreDataService {
 
         let coordinator = NSPersistentStoreCoordinator(managedObjectModel: model)
 
-        let context = NSManagedObjectContext(concurrencyType: .privateQueueConcurrencyType)
-        context.persistentStoreCoordinator = coordinator
-
         var storeOptions: [String: Any]?
 
-        if let historyTracking {
-            context.transactionAuthor = historyTracking.transactionAuthor
-            context.name = historyTracking.transactionAuthor
-            context.mergePolicy = NSMergeByPropertyObjectTrumpMergePolicy
-
+        if historyTracking != nil {
             storeOptions = [
                 NSPersistentHistoryTrackingKey: true,
                 NSPersistentStoreRemoteChangeNotificationPostOptionKey: true
@@ -142,35 +225,71 @@ extension CoreDataService {
             options: storeOptions
         )
 
-        self.context = context
+        let roles = try CoreDataContextRoles.make(
+            coordinator: coordinator,
+            mode: configuration.concurrencyMode,
+            historyTracking: historyTracking
+        )
 
-        if let historyTracking {
-            let targets = historyTracking.targets.isEmpty
-                ? [historyTracking.transactionAuthor]
-                : historyTracking.targets
+        // History setup can still throw — a shared container ```UserDefaults``` refuses, for instance.
+        // Everything that can fail happens before the store is published: publishing first would leave the
+        // caller with an error and the service wide open behind it, serving reads from a store whose
+        // history tracking is silently off and which no observable was ever told about.
+        let pendingHistoryObserver: CoreDataHistoryObserver?
 
-            let timestampManagers = try targets.map {
-                try CoreDataHistoryTimestampManager(
-                    target: $0,
+        do {
+            if let historyTracking {
+                let targets = historyTracking.targets.isEmpty
+                    ? [historyTracking.transactionAuthor]
+                    : historyTracking.targets
+
+                let timestampManagers = try targets.map {
+                    try CoreDataHistoryTimestampManager(
+                        target: $0,
+                        sharedContainer: historyTracking.sharedContainerName
+                    )
+                }
+
+                let currentTimestampManager = try CoreDataHistoryTimestampManager(
+                    target: historyTracking.transactionAuthor,
                     sharedContainer: historyTracking.sharedContainerName
                 )
+
+                pendingHistoryObserver = CoreDataHistoryObserver(
+                    contexts: roles.allContexts,
+                    timestampManager: currentTimestampManager,
+                    cleaner: CoreDataHistoryCleaner(timestampManagers: timestampManagers),
+                    logger: configuration.logger
+                )
+            } else {
+                pendingHistoryObserver = nil
+            }
+        } catch {
+            // Nothing may keep a store the service never published.
+            for store in coordinator.persistentStores {
+                try? coordinator.remove(store)
             }
 
-            let currentTimestampManager = try CoreDataHistoryTimestampManager(
-                target: historyTracking.transactionAuthor,
-                sharedContainer: historyTracking.sharedContainerName
-            )
-
-            let observer = CoreDataHistoryObserver(
-                context: context,
-                timestampManager: currentTimestampManager,
-                cleaner: CoreDataHistoryCleaner(timestampManagers: timestampManagers)
-            )
-            observer.startObserving()
-            self.historyObserver = observer
+            throw error
         }
 
-        return context
+        self.state = .open(roles)
+        self.historyObserver = pendingHistoryObserver
+
+        // Started only once the store is published, so a throw above cannot leave a live remote-change
+        // registration behind a service that still reports itself closed.
+        pendingHistoryObserver?.startObserving()
+
+        NotificationCenter.default.post(
+            name: .coreDataServiceDidOpen,
+            object: self,
+            userInfo: [
+                CoreDataServiceDidOpenKey.writer: roles.writer,
+                CoreDataServiceDidOpenKey.observer: roles.observer
+            ]
+        )
+
+        return roles
     }
 }
 
@@ -196,44 +315,183 @@ extension CoreDataService {
 
 extension CoreDataService: CoreDataServiceProtocol {
     public func performAsync(block: @escaping CoreDataContextInvocationBlock) {
-        lock.lock()
-
-        do {
-            if let context = context {
-                invoke(block: block, in: context)
-            } else {
-                let context = try setup()
-                invoke(block: block, in: context)
+        withRoles(onFailure: { block(nil, $0) }) { roles in
+            roles.writer.perform {
+                block(roles.writer, nil)
             }
-
-            lock.unlock()
-        } catch {
-            lock.unlock()
-
-            block(nil, error)
         }
     }
 
-    public func close() throws {
-        lock.lock()
+    public func performWrite<T>(
+        _ block: @escaping CoreDataContextBlock<T>,
+        completion: @escaping CoreDataResultBlock<T>
+    ) {
+        withRoles(onFailure: { completion(.failure($0)) }) { roles in
+            roles.writer.perform {
+                // Changes a legacy ```performAsync``` block left unsaved join this transaction, as they
+                // always did on the shared context in 2.x.
+                do {
+                    let value = try block(roles.writer)
 
-        defer {
-            lock.unlock()
+                    if roles.writer.hasChanges {
+                        try roles.writer.save()
+                    }
+
+                    completion(.success(value))
+                } catch {
+                    roles.writer.rollback()
+                    completion(.failure(error))
+                }
+            }
         }
+    }
 
-        historyObserver?.stopObserving()
-        historyObserver = nil
+    public func performRead<T>(
+        _ block: @escaping CoreDataContextBlock<T>,
+        completion: @escaping CoreDataResultBlock<T>
+    ) {
+        withRoles(onFailure: { completion(.failure($0)) }) { roles in
+            guard let readerQueue = roles.readerQueue else {
+                roles.writer.perform {
+                    // Only discard what the read itself introduced; a legacy block may own pending changes.
+                    let wasClean = !roles.writer.hasChanges
+                    let result = Result { try block(roles.writer) }
 
-        context?.performAndWait {
-            guard let coordinator = self.context?.persistentStoreCoordinator else {
+                    if wasClean, roles.writer.hasChanges {
+                        // A read must not mutate: the change would otherwise join the next write's save.
+                        // Rolling back is what protects the store; the failure is what tells the caller.
+                        roles.writer.rollback()
+
+                        // A block that threw already has a more informative error than this one.
+                        if case .success = result {
+                            completion(.failure(CoreDataServiceError.readLeftChanges))
+                            return
+                        }
+                    }
+
+                    completion(result)
+                }
                 return
             }
 
-            for store in coordinator.persistentStores {
-                try? coordinator.remove(store)
-            }
+            // Counted here, under the service lock, so a ```close()``` reaching the lock next still waits
+            // for this read even though its operation has not started.
+            roles.readerActivity.enter()
 
-            self.context = nil
+            readerQueue.addOperation {
+                let result: Result<T, Error> = {
+                    defer { roles.readerActivity.leave() }
+
+                    let reader = roles.makeReader()
+                    var value: Result<T, Error>!
+
+                    reader.performAndWait {
+                        value = CoreDataReaderActivity.markingCurrentThread {
+                            Result { try block(reader) }
+                        }
+
+                        if reader.hasChanges {
+                            // The reader is discarded unsaved either way, but the contract is reported
+                            // identically in both modes so callers see one behaviour.
+                            reader.rollback()
+
+                            // A block that threw already has a more informative error than this one.
+                            if case .success = value {
+                                value = .failure(CoreDataServiceError.readLeftChanges)
+                            }
+                        }
+                    }
+
+                    return value
+                }()
+
+                // Delivered off the reader pool entirely. Running it here would hold a concurrency slot
+                // for the completion's whole duration, and consumers of this library block in completions
+                // as a matter of course — ```extractNoCancellableResultData``` and
+                // ```addOperations(_:waitUntilFinished:)``` both do. With ```readerConcurrency``` of 1,
+                // which is a legal and documented value, that is a guaranteed deadlock rather than a
+                // slowdown. The configured queue must be concurrent for the same reason; see
+                // ```CoreDataServiceConfigurationProtocol.completionQueue```.
+                self.configuration.completionQueue.async {
+                    completion(result)
+                }
+            }
+        }
+    }
+
+    public func performObserve(block: @escaping CoreDataContextInvocationBlock) {
+        withRoles(onFailure: { block(nil, $0) }) { roles in
+            roles.observer.perform {
+                block(roles.observer, nil)
+            }
+        }
+    }
+
+    public func performWithObserver(block: @escaping CoreDataWriterObserverBlock) {
+        withRoles(onFailure: { block(nil, nil, $0) }) { roles in
+            roles.writer.perform {
+                block(roles.writer, roles.observer, nil)
+            }
+        }
+    }
+
+    /// Detaches the roles under the lock, then drains them with the lock released: queued work may call back
+    /// into the service (a read completion issuing another read, an observable reacting to a save), and those
+    /// calls must find a free lock rather than deadlock. Work arriving while the drain is running is rejected
+    /// with ```closeInProgress```; work arriving after this returns opens a fresh store.
+    ///
+    /// - throws: ```closeFromReadBlock``` when called from inside a read block, which still holds the store
+    /// this call would wait for, and ```closeInProgress``` when another close is already draining.
+    public func close() throws {
+        guard !CoreDataReaderActivity.isReadingOnCurrentThread else {
+            throw CoreDataServiceError.closeFromReadBlock
+        }
+
+        lock.lock()
+
+        let roles: CoreDataContextRoles
+
+        switch state {
+        case .closed:
+            lock.unlock()
+            return
+        case .closing:
+            lock.unlock()
+            throw CoreDataServiceError.closeInProgress
+        case .open(let open):
+            roles = open
+            state = .closing
+
+            historyObserver?.stopObserving()
+            historyObserver = nil
+        }
+
+        lock.unlock()
+
+        defer {
+            lock.lock()
+            state = .closed
+            lock.unlock()
+        }
+
+        // Reads hold the store only while their block runs; their completions come after and may re-enter
+        // the service, so waiting on the reader queue itself would wait for those too.
+        roles.readerActivity.waitUntilIdle()
+
+        // Flush queued transactions first: their did-save notifications enqueue the observer work that the
+        // reset below must run after.
+        roles.writer.performAndWait {}
+
+        if roles.observer !== roles.writer {
+            roles.observer.performAndWait {
+                roles.observer.reset()
+            }
+        }
+
+        roles.writer.performAndWait {
+            for store in roles.coordinator.persistentStores {
+                try? roles.coordinator.remove(store)
+            }
         }
     }
 
@@ -244,8 +502,14 @@ extension CoreDataService: CoreDataServiceProtocol {
             lock.unlock()
         }
 
-        guard context == nil else {
+        switch state {
+        case .open:
             throw CoreDataServiceError.unexpectedDropWhenOpen
+        case .closing:
+            // Detached but still draining: removing the file now pulls it out from under a live coordinator.
+            throw CoreDataServiceError.closeInProgress
+        case .closed:
+            break
         }
 
         guard case .persistent(let settings) = configuration.storageType else {

@@ -181,7 +181,7 @@ private final class SpyHistoryMerger: CoreDataHistoryMerging {
     private(set) var mergeCalled = false
 
     func merge(
-        context: NSManagedObjectContext,
+        contexts: [NSManagedObjectContext],
         transactions: [NSPersistentHistoryTransaction]
     ) -> [Notification] {
         mergeCalled = true

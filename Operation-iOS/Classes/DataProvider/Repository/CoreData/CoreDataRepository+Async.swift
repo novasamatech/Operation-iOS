@@ -6,232 +6,156 @@ extension CoreDataRepository {
                options: RepositoryFetchOptions,
                runCompletionIn queue: DispatchQueue?,
                executing block: @escaping (Model?, Error?) -> Void) {
+        databaseService.performRead({ [dataMapper, filter] context -> Model? in
+            let entityName = String(describing: U.self)
+            let fetchRequest = NSFetchRequest<U>(entityName: entityName)
+            let modelId = try modelIdClosure()
+            var predicate = NSPredicate(format: "%K == %@", dataMapper.entityIdentifierFieldName, modelId)
 
-        databaseService.performAsync { [weak self] (optionalContext, optionalError) in
-            guard let strongSelf = self else {
-                return
+            if let filter {
+                predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [filter, predicate])
             }
 
-            if let context = optionalContext {
-                do {
-                    let entityName = String(describing: U.self)
-                    let fetchRequest = NSFetchRequest<U>(entityName: entityName)
-                    let modelId = try modelIdClosure()
-                    var predicate = NSPredicate(format: "%K == %@",
-                                                strongSelf.dataMapper.entityIdentifierFieldName,
-                                                modelId)
+            fetchRequest.predicate = predicate
+            fetchRequest.includesPropertyValues = options.includesProperties
 
-                    if let filter = strongSelf.filter {
-                        predicate = NSCompoundPredicate(andPredicateWithSubpredicates: [filter, predicate])
-                    }
+            // Values are read with the fetch rather than when each fault fires. A read may overlap a write
+            // that deletes the row, and a fault fired afterwards resolves to a deleted object with empty
+            // values — so deferring the read would let a concurrent delete quietly hollow out the result.
+            // A caller that asked not to fetch properties wants the faults, and keeps them.
+            fetchRequest.returnsObjectsAsFaults = !options.includesProperties
+            fetchRequest.includesSubentities = options.includesSubentities
 
-                    fetchRequest.predicate = predicate
-
-                    fetchRequest.includesPropertyValues = options.includesProperties
-                    fetchRequest.includesSubentities = options.includesSubentities
-
-                    let entities = try context.fetch(fetchRequest)
-
-                    if let entity = entities.first {
-                        let model = try strongSelf.dataMapper.transform(entity: entity)
-
-                        strongSelf.call(block: block, model: model, error: nil, queue: queue)
-                    } else {
-                        strongSelf.call(block: block, model: nil, error: nil, queue: queue)
-                    }
-                } catch {
-                    strongSelf.call(block: block, model: nil, error: error, queue: queue)
-                }
-            } else {
-                strongSelf.call(block: block, model: nil, error: optionalError, queue: queue)
-            }
-        }
+            return try context.fetch(fetchRequest).first.map { try dataMapper.transform(entity: $0) }
+        }, completion: { [weak self] result in
+            self?.call(block: block, model: result.value ?? nil, error: result.failureError, queue: queue)
+        })
     }
 
     func fetchAll(with options: RepositoryFetchOptions,
                   runCompletionIn queue: DispatchQueue?,
                   executing block: @escaping ([Model]?, Error?) -> Void) {
+        databaseService.performRead({ [dataMapper, filter, sortDescriptors] context -> [Model] in
+            let entityName = String(describing: U.self)
+            let fetchRequest = NSFetchRequest<U>(entityName: entityName)
+            fetchRequest.predicate = filter
 
-        databaseService.performAsync { [weak self] (optionalContext, optionalError) in
-            guard let strongSelf = self else {
-                return
+            if !sortDescriptors.isEmpty {
+                fetchRequest.sortDescriptors = sortDescriptors
             }
 
-            if let context = optionalContext {
-                do {
-                    let entityName = String(describing: U.self)
-                    let fetchRequest = NSFetchRequest<U>(entityName: entityName)
-                    fetchRequest.predicate = strongSelf.filter
+            fetchRequest.includesPropertyValues = options.includesProperties
 
-                    if !strongSelf.sortDescriptors.isEmpty {
-                        fetchRequest.sortDescriptors = strongSelf.sortDescriptors
-                    }
+            // Values are read with the fetch rather than when each fault fires. A read may overlap a write
+            // that deletes the row, and a fault fired afterwards resolves to a deleted object with empty
+            // values — so deferring the read would let a concurrent delete quietly hollow out the result.
+            // A caller that asked not to fetch properties wants the faults, and keeps them.
+            fetchRequest.returnsObjectsAsFaults = !options.includesProperties
+            fetchRequest.includesSubentities = options.includesSubentities
 
-                    fetchRequest.includesPropertyValues = options.includesProperties
-                    fetchRequest.includesSubentities = options.includesSubentities
-
-                    let entities = try context.fetch(fetchRequest)
-                    let models = try entities.map { try strongSelf.dataMapper.transform(entity: $0) }
-
-                    strongSelf.call(block: block, model: models, error: nil, queue: queue)
-
-                } catch {
-                    strongSelf.call(block: block, model: nil, error: error, queue: queue)
-                }
-            } else {
-                strongSelf.call(block: block, model: nil, error: optionalError, queue: queue)
-            }
-        }
+            return try context.fetch(fetchRequest).map { try dataMapper.transform(entity: $0) }
+        }, completion: { [weak self] result in
+            self?.call(block: block, model: result.value, error: result.failureError, queue: queue)
+        })
     }
 
     func fetch(request: RepositorySliceRequest,
                options: RepositoryFetchOptions,
                runCompletionIn queue: DispatchQueue?,
                executing block: @escaping ([Model]?, Error?) -> Void) {
-        databaseService.performAsync { [weak self] (optionalContext, optionalError) in
-            guard let strongSelf = self else {
-                return
-            }
+        databaseService.performRead({ [dataMapper, filter, sortDescriptors] context -> [Model] in
+            let entityName = String(describing: U.self)
+            let fetchRequest = NSFetchRequest<U>(entityName: entityName)
+            fetchRequest.predicate = filter
+            fetchRequest.fetchOffset = request.offset
+            fetchRequest.fetchLimit = request.count
 
-            if let context = optionalContext {
-                do {
-                    let entityName = String(describing: U.self)
-                    let fetchRequest = NSFetchRequest<U>(entityName: entityName)
-                    fetchRequest.predicate = strongSelf.filter
-                    fetchRequest.fetchOffset = request.offset
-                    fetchRequest.fetchLimit = request.count
+            var effectiveSortDescriptors = sortDescriptors
 
-                    var sortDescriptors = strongSelf.sortDescriptors
-
-                    if request.reversed {
-                        sortDescriptors = sortDescriptors.compactMap {
-                            $0.reversedSortDescriptor as? NSSortDescriptor
-                        }
-                    }
-
-                    if !sortDescriptors.isEmpty {
-                        fetchRequest.sortDescriptors = sortDescriptors
-                    }
-
-                    fetchRequest.includesPropertyValues = options.includesProperties
-                    fetchRequest.includesSubentities = options.includesSubentities
-
-                    let entities = try context.fetch(fetchRequest)
-                    let models = try entities.map { try strongSelf.dataMapper.transform(entity: $0) }
-
-                    strongSelf.call(block: block, model: models, error: nil, queue: queue)
-
-                } catch {
-                    strongSelf.call(block: block, model: nil, error: error, queue: queue)
+            if request.reversed {
+                effectiveSortDescriptors = effectiveSortDescriptors.compactMap {
+                    $0.reversedSortDescriptor as? NSSortDescriptor
                 }
-            } else {
-                strongSelf.call(block: block, model: nil, error: optionalError, queue: queue)
             }
-        }
+
+            if !effectiveSortDescriptors.isEmpty {
+                fetchRequest.sortDescriptors = effectiveSortDescriptors
+            }
+
+            fetchRequest.includesPropertyValues = options.includesProperties
+
+            // Values are read with the fetch rather than when each fault fires. A read may overlap a write
+            // that deletes the row, and a fault fired afterwards resolves to a deleted object with empty
+            // values — so deferring the read would let a concurrent delete quietly hollow out the result.
+            // A caller that asked not to fetch properties wants the faults, and keeps them.
+            fetchRequest.returnsObjectsAsFaults = !options.includesProperties
+            fetchRequest.includesSubentities = options.includesSubentities
+
+            return try context.fetch(fetchRequest).map { try dataMapper.transform(entity: $0) }
+        }, completion: { [weak self] result in
+            self?.call(block: block, model: result.value, error: result.failureError, queue: queue)
+        })
     }
 
     func save(updating updatedModels: [Model], deleting deletedIds: [String],
               runCompletionIn queue: DispatchQueue?,
               executing block: @escaping (Error?) -> Void) {
-
-        databaseService.performAsync { (optionalContext, optionalError) in
-
-            if let context = optionalContext {
-                do {
-                    try self.save(models: updatedModels, in: context)
-
-                    try self.delete(modelIds: deletedIds, in: context)
-
-                    try context.save()
-
-                    self.call(block: block, error: nil, queue: queue)
-
-                } catch {
-                    context.rollback()
-
-                    self.call(block: block, error: error, queue: queue)
-                }
-            } else {
-                self.call(block: block, error: optionalError, queue: queue)
-            }
-        }
+        databaseService.performWrite({ context in
+            try self.save(models: updatedModels, in: context)
+            try self.delete(modelIds: deletedIds, in: context)
+        }, completion: { result in
+            self.call(block: block, error: result.failureError, queue: queue)
+        })
     }
 
     func replace(with newModels: [Model],
                  runCompletionIn queue: DispatchQueue?,
                  executing block: @escaping (Error?) -> Void) {
-        databaseService.performAsync { (optionalContext, optionalError) in
-            if let context = optionalContext {
-                do {
-                    try self.deleteAll(in: context)
-                    try self.create(models: newModels, in: context)
-
-                    try context.save()
-
-                    self.call(block: block, error: nil, queue: queue)
-
-                } catch {
-                    context.rollback()
-
-                    self.call(block: block, error: error, queue: queue)
-                }
-            } else {
-                self.call(block: block, error: optionalError, queue: queue)
-            }
-        }
+        databaseService.performWrite({ context in
+            try self.deleteAll(in: context)
+            try self.create(models: newModels, in: context)
+        }, completion: { result in
+            self.call(block: block, error: result.failureError, queue: queue)
+        })
     }
 
     func fetchCount(runCompletionIn queue: DispatchQueue?,
                     executing block: @escaping (Int?, Error?) -> Void) {
-        databaseService.performAsync { [weak self] (optionalContext, optionalError) in
-            guard let strongSelf = self else {
-                return
-            }
+        databaseService.performRead({ [filter] context -> Int in
+            let entityName = String(describing: U.self)
+            let fetchRequest = NSFetchRequest<U>(entityName: entityName)
+            fetchRequest.predicate = filter
 
-            if let context = optionalContext {
-                do {
-                    let entityName = String(describing: U.self)
-                    let fetchRequest = NSFetchRequest<U>(entityName: entityName)
-                    fetchRequest.predicate = strongSelf.filter
-
-                    let count = try context.count(for: fetchRequest)
-
-                    strongSelf.call(block: block, model: count, error: nil, queue: queue)
-
-                } catch {
-                    context.rollback()
-
-                    strongSelf.call(block: block, model: nil, error: error, queue: queue)
-                }
-            } else {
-                strongSelf.call(block: block, model: nil, error: optionalError, queue: queue)
-            }
-        }
+            return try context.count(for: fetchRequest)
+        }, completion: { [weak self] result in
+            self?.call(block: block, model: result.value, error: result.failureError, queue: queue)
+        })
     }
 
     func deleteAll(runCompletionIn queue: DispatchQueue?,
                    executing block: @escaping (Error?) -> Void) {
-        databaseService.performAsync { [weak self] (optionalContext, optionalError) in
-            guard let strongSelf = self else {
-                return
-            }
+        databaseService.performWrite({ [weak self] context in
+            try self?.deleteAll(in: context)
+        }, completion: { [weak self] result in
+            self?.call(block: block, error: result.failureError, queue: queue)
+        })
+    }
+}
 
-            if let context = optionalContext {
-                do {
-                    try strongSelf.deleteAll(in: context)
-
-                    try context.save()
-
-                    strongSelf.call(block: block, error: nil, queue: queue)
-
-                } catch {
-                    context.rollback()
-
-                    strongSelf.call(block: block, error: error, queue: queue)
-                }
-            } else {
-                strongSelf.call(block: block, error: optionalError, queue: queue)
-            }
+private extension Result {
+    var value: Success? {
+        if case .success(let value) = self {
+            return value
         }
+
+        return nil
+    }
+
+    var failureError: Error? {
+        if case .failure(let error) = self {
+            return error
+        }
+
+        return nil
     }
 }

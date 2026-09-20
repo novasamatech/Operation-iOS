@@ -16,7 +16,7 @@ final class CoreDataHistoryMergerTests: HistoryTrackingTestCase {
         let context = NSManagedObjectContext(concurrencyType: .privateQueueConcurrencyType)
 
         // when
-        let notifications = merger.merge(context: context, transactions: [])
+        let notifications = merger.merge(contexts: [context], transactions: [])
 
         // then
         XCTAssertTrue(notifications.isEmpty)
@@ -41,7 +41,7 @@ final class CoreDataHistoryMergerTests: HistoryTrackingTestCase {
                 "Expected one transaction per save"
             )
 
-            let notifications = CoreDataHistoryMerger().merge(context: context, transactions: transactions)
+            let notifications = CoreDataHistoryMerger().merge(contexts: [context], transactions: transactions)
 
             // then
             XCTAssertEqual(notifications.count, transactions.count)
@@ -59,7 +59,7 @@ final class CoreDataHistoryMergerTests: HistoryTrackingTestCase {
             let transactions = try CoreDataHistoryFetcher().fetch(context: context, fromDate: fetchDate)
             XCTAssertFalse(transactions.isEmpty)
 
-            let notifications = CoreDataHistoryMerger().merge(context: context, transactions: transactions)
+            let notifications = CoreDataHistoryMerger().merge(contexts: [context], transactions: transactions)
 
             // then - every notification should carry the object-ID userInfo payload, which is
             // what `CoreDataContextObservable` downstream relies on.

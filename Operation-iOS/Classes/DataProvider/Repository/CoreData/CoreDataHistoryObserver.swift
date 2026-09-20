@@ -1,6 +1,7 @@
 import Foundation
 import CoreData
 import UIKit
+import SDKLogger
 
 /**
  *  Class is designed to observe Core Data persistent history changes from other processes
@@ -14,38 +15,81 @@ import UIKit
  *  notifications so that any ```CoreDataContextObservable``` instances listening on the
  *  same context automatically pick up the remote changes.
  *
+ *  Deleted rows are gone by the time a transaction is replayed, so their identifiers can only come from
+ *  persistent-history tombstones. The re-posted notification carries them under ```tombstonesKey``` as
+ *  ```CoreDataHistoryTombstone``` values; attributes are only preserved there when the model marks them
+ *  with ```preserveAfterDeletion```.
+ *
  *  It also observes app state to process any pending history when the app becomes active.
  */
 
+/// The attributes persistent history preserved for a row another process deleted.
+public struct CoreDataHistoryTombstone {
+    public let objectID: NSManagedObjectID
+    public let values: [AnyHashable: Any]
+}
+
 public final class CoreDataHistoryObserver {
-    private let context: NSManagedObjectContext
+    /// ```userInfo``` key of the re-posted did-save notification holding ```[CoreDataHistoryTombstone]```.
+    public static let tombstonesKey = "io.novasama.coredata.history.tombstones"
+
+    private let contexts: [NSManagedObjectContext]
     private let timestampManager: CoreDataHistoryTimestampManaging
     private let fetcher: CoreDataHistoryFetching
     private let merger: CoreDataHistoryMerging
     private let cleaner: CoreDataHistoryCleaning
+    private let logger: SDKLoggerProtocol?
+
+    /// The context history is fetched on, cleaned from and re-posted for: the writer.
+    private var context: NSManagedObjectContext { contexts[0] }
 
     /**
      *  Creates a new persistent history observer.
      *
      *  - parameters:
-     *    - context: The managed object context to merge remote changes into.
+     *    - contexts: The managed object contexts to merge remote changes into. The first one is
+     *      the writer: history is fetched and cleaned there and re-posted with it as the notification
+     *      object. Every remaining context (an observer context, typically) receives the same merge.
      *    - timestampManager: Timestamp manager tracking history processed by the current target.
      *    - cleaner: Object responsible for cleaning old history across all targets.
      *    - fetcher: Object responsible for fetching history transactions. Defaults to ```CoreDataHistoryFetcher```.
      *    - merger: Object responsible for merging transactions into context. Defaults to ```CoreDataHistoryMerger```.
      */
     public init(
-        context: NSManagedObjectContext,
+        contexts: [NSManagedObjectContext],
         timestampManager: CoreDataHistoryTimestampManaging,
         cleaner: CoreDataHistoryCleaning,
         fetcher: CoreDataHistoryFetching = CoreDataHistoryFetcher(),
-        merger: CoreDataHistoryMerging = CoreDataHistoryMerger()
+        merger: CoreDataHistoryMerging = CoreDataHistoryMerger(),
+        logger: SDKLoggerProtocol? = nil
     ) {
-        self.context = context
+        precondition(!contexts.isEmpty, "history observer needs at least the writer context")
+
+        self.contexts = contexts
         self.timestampManager = timestampManager
         self.cleaner = cleaner
         self.fetcher = fetcher
         self.merger = merger
+        self.logger = logger
+    }
+
+    /// Single-context convenience: the 2.x shape.
+    public convenience init(
+        context: NSManagedObjectContext,
+        timestampManager: CoreDataHistoryTimestampManaging,
+        cleaner: CoreDataHistoryCleaning,
+        fetcher: CoreDataHistoryFetching = CoreDataHistoryFetcher(),
+        merger: CoreDataHistoryMerging = CoreDataHistoryMerger(),
+        logger: SDKLoggerProtocol? = nil
+    ) {
+        self.init(
+            contexts: [context],
+            timestampManager: timestampManager,
+            cleaner: cleaner,
+            fetcher: fetcher,
+            merger: merger,
+            logger: logger
+        )
     }
 
     /// Starts observing persistent store remote changes and app state notifications.
@@ -114,18 +158,42 @@ private extension CoreDataHistoryObserver {
                 !transactions.isEmpty
             else { return }
 
-            _ = self.merger.merge(context: self.context, transactions: transactions)
+            // One call for every context: the transactions are bound to this queue, so they are reduced to
+            // notifications here and only the identifiers travel. Handing them to another context's queue
+            // would read the same transaction objects from two queues at once.
+            _ = self.merger.merge(contexts: self.contexts, transactions: transactions)
 
             if let lastTimestamp = transactions.last?.timestamp {
                 self.timestampManager.update(to: lastTimestamp)
             }
 
             // Post as didSave so CoreDataContextObservable picks up the changes
-            transactions.forEach {
+            transactions.forEach { transaction in
+                var userInfo = transaction.objectIDNotification().userInfo ?? [:]
+
+                let deletes = (transaction.changes ?? []).filter { $0.changeType == .delete }
+
+                let tombstones = deletes.compactMap { change in
+                    change.tombstone.map { CoreDataHistoryTombstone(objectID: change.changedObjectID, values: $0) }
+                }
+
+                if tombstones.count < deletes.count {
+                    // The rows are already gone; without a tombstone nothing identifies them to observers.
+                    self.logger?.warning(
+                        "\(deletes.count - tombstones.count) remote delete(s) carried no persistent-history "
+                        + "tombstone and cannot be delivered to observers. Mark the identifier attribute with "
+                        + "Preserve After Deletion in the model."
+                    )
+                }
+
+                if !tombstones.isEmpty {
+                    userInfo[Self.tombstonesKey] = tombstones
+                }
+
                 NotificationCenter.default.post(
                     name: .NSManagedObjectContextDidSave,
                     object: self.context,
-                    userInfo: $0.objectIDNotification().userInfo
+                    userInfo: userInfo
                 )
             }
 
