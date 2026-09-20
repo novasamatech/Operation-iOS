@@ -180,6 +180,30 @@ final class CoreDataConcurrencyModeTests: XCTestCase {
         }
     }
 
+    /// A reader can outlive the row it fetched: with reads overlapping writes, the writer may commit a
+    /// delete between the fetch and the moment a fault fires. ``shouldDeleteInaccessibleFaults`` defaults to
+    /// ``true``, so such a fault yields a deleted object rather than raising ``NSObjectInaccessibleException``
+    /// — an Objective-C exception the ``Result`` around the read block could not catch. This pins that
+    /// default: turning it off on readers would make a concurrent delete terminate the process.
+    func testReaderDiscardsInaccessibleFaults() {
+        forEachMode { service, mode in
+            guard mode == "concurrent" else {
+                // Serial reads run on the writer, serialised against every write: there is no window.
+                return
+            }
+
+            let opened = expectation(description: "store opened in \(mode)")
+            service.performAsync { _, _ in opened.fulfill() }
+            wait(for: [opened], timeout: Constants.expectationDuration)
+
+            guard let roles = service.roles else {
+                return XCTFail("\(mode): store did not open")
+            }
+
+            XCTAssertTrue(roles.makeReader().shouldDeleteInaccessibleFaults, mode)
+        }
+    }
+
     func testRolesMatchMode() {
         forEachMode { service, mode in
             let opened = expectation(description: "open in \(mode)")

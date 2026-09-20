@@ -18,6 +18,12 @@ extension CoreDataRepository {
 
             fetchRequest.predicate = predicate
             fetchRequest.includesPropertyValues = options.includesProperties
+
+            // Values are read with the fetch rather than when each fault fires. A read may overlap a write
+            // that deletes the row, and a fault fired afterwards resolves to a deleted object with empty
+            // values — so deferring the read would let a concurrent delete quietly hollow out the result.
+            // A caller that asked not to fetch properties wants the faults, and keeps them.
+            fetchRequest.returnsObjectsAsFaults = !options.includesProperties
             fetchRequest.includesSubentities = options.includesSubentities
 
             return try context.fetch(fetchRequest).first.map { try dataMapper.transform(entity: $0) }
@@ -39,6 +45,12 @@ extension CoreDataRepository {
             }
 
             fetchRequest.includesPropertyValues = options.includesProperties
+
+            // Values are read with the fetch rather than when each fault fires. A read may overlap a write
+            // that deletes the row, and a fault fired afterwards resolves to a deleted object with empty
+            // values — so deferring the read would let a concurrent delete quietly hollow out the result.
+            // A caller that asked not to fetch properties wants the faults, and keeps them.
+            fetchRequest.returnsObjectsAsFaults = !options.includesProperties
             fetchRequest.includesSubentities = options.includesSubentities
 
             return try context.fetch(fetchRequest).map { try dataMapper.transform(entity: $0) }
@@ -71,6 +83,12 @@ extension CoreDataRepository {
             }
 
             fetchRequest.includesPropertyValues = options.includesProperties
+
+            // Values are read with the fetch rather than when each fault fires. A read may overlap a write
+            // that deletes the row, and a fault fired afterwards resolves to a deleted object with empty
+            // values — so deferring the read would let a concurrent delete quietly hollow out the result.
+            // A caller that asked not to fetch properties wants the faults, and keeps them.
+            fetchRequest.returnsObjectsAsFaults = !options.includesProperties
             fetchRequest.includesSubentities = options.includesSubentities
 
             return try context.fetch(fetchRequest).map { try dataMapper.transform(entity: $0) }
