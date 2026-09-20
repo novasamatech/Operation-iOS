@@ -1,4 +1,5 @@
 import Foundation
+import SDKLogger
 import Operation_iOS
 
 extension CoreDataServiceConfiguration {
@@ -45,7 +46,8 @@ extension CoreDataServiceConfiguration {
         transactionAuthor: String = "test",
         targets: [String] = [],
         sharedContainerName: String = "test",
-        concurrencyMode: CoreDataConcurrencyMode = .serial
+        concurrencyMode: CoreDataConcurrencyMode = .serial,
+        logger: SDKLoggerProtocol? = nil
     ) -> CoreDataServiceConfiguration {
         let bundle: Bundle
 #if SWIFT_PACKAGE
@@ -75,7 +77,8 @@ extension CoreDataServiceConfiguration {
 
         let configuration = CoreDataServiceConfiguration(modelURL: modelURL!,
                                                          storageType: .persistent(settings: persistentSettings),
-                                                         concurrencyMode: concurrencyMode)
+                                                         concurrencyMode: concurrencyMode,
+                                                         logger: logger)
 
         return configuration
     }

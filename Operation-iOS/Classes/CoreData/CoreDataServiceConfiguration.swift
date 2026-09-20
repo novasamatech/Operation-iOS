@@ -1,4 +1,5 @@
 import Foundation
+import SDKLogger
 
 /**
  *  Structure is designed to provide setup values for Core Data service.
@@ -15,6 +16,9 @@ public struct CoreDataServiceConfiguration: CoreDataServiceConfigurationProtocol
     /// Context topology; ```.serial``` reproduces 2.x behaviour.
     public var concurrencyMode: CoreDataConcurrencyMode
 
+    /// Destination for diagnostics that cannot be surfaced as errors.
+    public var logger: SDKLoggerProtocol?
+
     /**
      *  Creates Core Data service configuration.
      *
@@ -27,10 +31,12 @@ public struct CoreDataServiceConfiguration: CoreDataServiceConfigurationProtocol
     public init(
         modelURL: URL,
         storageType: CoreDataServiceStorageType,
-        concurrencyMode: CoreDataConcurrencyMode = .serial
+        concurrencyMode: CoreDataConcurrencyMode = .serial,
+        logger: SDKLoggerProtocol? = nil
     ) {
         self.modelURL = modelURL
         self.storageType = storageType
         self.concurrencyMode = concurrencyMode
+        self.logger = logger
     }
 }

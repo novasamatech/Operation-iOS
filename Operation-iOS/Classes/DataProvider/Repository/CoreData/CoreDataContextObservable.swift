@@ -1,5 +1,6 @@
 import Foundation
 import CoreData
+import SDKLogger
 
 /**
  *  Class is designed to provide implementation for ```DataProviderRepositoryObservable``` and allows
@@ -334,6 +335,7 @@ extension CoreDataContextObservable: DataProviderRepositoryObservable {
             }
 
             self.observerContext = observer
+            self.warnIfRemoteDeletesCannotArrive(checking: writer)
 
             NotificationCenter.default.addObserver(
                 self,
@@ -344,6 +346,36 @@ extension CoreDataContextObservable: DataProviderRepositoryObservable {
 
             completionBlock(nil)
         }
+    }
+
+    /// Remote deletes reach an observable only through persistent-history tombstones, and Core Data writes
+    /// an attribute into one only when the model marks it ```preserveAfterDeletion```. Reported here because
+    /// the alternative is a consumer discovering, in production, that remote inserts and updates arrive but
+    /// deletes never do.
+    private func warnIfRemoteDeletesCannotArrive(checking context: NSManagedObjectContext) {
+        guard
+            case .persistent(let settings) = service.configuration.storageType,
+            settings.historyTracking != nil,
+            let logger = service.configuration.logger
+        else {
+            return
+        }
+
+        // Entities are addressed by class name throughout the library. A model that names them otherwise
+        // cannot be checked here, and guessing would be worse than staying quiet.
+        guard
+            let entity = context.persistentStoreCoordinator?.managedObjectModel.entitiesByName[entityName],
+            let attribute = entity.attributesByName[mapper.entityIdentifierFieldName],
+            !attribute.preservesValueInHistoryOnDeletion
+        else {
+            return
+        }
+
+        logger.warning(
+            "\(entityName).\(mapper.entityIdentifierFieldName) is not preserved after deletion: deletes "
+            + "made by other processes cannot be delivered to this observable. Mark the attribute with "
+            + "Preserve After Deletion in the model to receive them."
+        )
     }
 
     public func stop(completionBlock: @escaping (Error?) -> Void) {

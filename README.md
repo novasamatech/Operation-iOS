@@ -67,6 +67,13 @@ persistent-history tombstones. Mark the identifier attribute with **Preserve Aft
 (`preserveAfterDeletion="YES"`) for remote deletes to reach observers; without it only remote inserts and updates
 are delivered.
 
+Set `logger` on the configuration to be told when that is missing, rather than discovering it from absent deletes:
+`CoreDataContextObservable.start()` warns once if the observed entity's identifier attribute is not preserved, and
+the history observer warns when a replayed transaction contains deletes it cannot identify. Both are warnings, not
+errors — a store that never sees cross-process deletes works fine without the flag. The start-time check addresses
+entities by class name like the rest of the library, so it cannot run on a model whose entity names differ from its
+class names; the history-observer warning still covers that case.
+
 `close()` detaches the store, then drains queued reads, writes and observer work with the lock released, so a
 completion or observer that calls back into the service cannot deadlock it. A read's *completion* may close the
 service — it is already finished with the reading context. A read's *block* may not: it still holds the store

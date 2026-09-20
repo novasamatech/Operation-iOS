@@ -1,5 +1,6 @@
 import Foundation
 import CoreData
+import SDKLogger
 
 /**
  *  Enum is defining possible strategies to handle situations
@@ -137,10 +138,16 @@ public protocol CoreDataServiceConfigurationProtocol {
 
     /// Context topology. Defaults to ```.serial``` for conformers that predate the setting.
     var concurrencyMode: CoreDataConcurrencyMode { get }
+
+    /// Destination for diagnostics the store and its observables cannot raise as errors — a model that
+    /// cannot deliver remote deletes, for instance. Defaults to ```nil```, which silences them.
+    var logger: SDKLoggerProtocol? { get }
 }
 
 public extension CoreDataServiceConfigurationProtocol {
     var concurrencyMode: CoreDataConcurrencyMode { .serial }
+
+    var logger: SDKLoggerProtocol? { nil }
 }
 
 /**

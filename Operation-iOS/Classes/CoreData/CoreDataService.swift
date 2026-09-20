@@ -239,7 +239,8 @@ extension CoreDataService {
             let observer = CoreDataHistoryObserver(
                 contexts: roles.allContexts,
                 timestampManager: currentTimestampManager,
-                cleaner: CoreDataHistoryCleaner(timestampManagers: timestampManagers)
+                cleaner: CoreDataHistoryCleaner(timestampManagers: timestampManagers),
+                logger: configuration.logger
             )
             observer.startObserving()
             self.historyObserver = observer

@@ -1,6 +1,7 @@
 import Foundation
 import CoreData
 import UIKit
+import SDKLogger
 
 /**
  *  Class is designed to observe Core Data persistent history changes from other processes
@@ -37,6 +38,7 @@ public final class CoreDataHistoryObserver {
     private let fetcher: CoreDataHistoryFetching
     private let merger: CoreDataHistoryMerging
     private let cleaner: CoreDataHistoryCleaning
+    private let logger: SDKLoggerProtocol?
 
     /// The context history is fetched on, cleaned from and re-posted for: the writer.
     private var context: NSManagedObjectContext { contexts[0] }
@@ -58,7 +60,8 @@ public final class CoreDataHistoryObserver {
         timestampManager: CoreDataHistoryTimestampManaging,
         cleaner: CoreDataHistoryCleaning,
         fetcher: CoreDataHistoryFetching = CoreDataHistoryFetcher(),
-        merger: CoreDataHistoryMerging = CoreDataHistoryMerger()
+        merger: CoreDataHistoryMerging = CoreDataHistoryMerger(),
+        logger: SDKLoggerProtocol? = nil
     ) {
         precondition(!contexts.isEmpty, "history observer needs at least the writer context")
 
@@ -67,6 +70,7 @@ public final class CoreDataHistoryObserver {
         self.cleaner = cleaner
         self.fetcher = fetcher
         self.merger = merger
+        self.logger = logger
     }
 
     /// Single-context convenience: the 2.x shape.
@@ -75,14 +79,16 @@ public final class CoreDataHistoryObserver {
         timestampManager: CoreDataHistoryTimestampManaging,
         cleaner: CoreDataHistoryCleaning,
         fetcher: CoreDataHistoryFetching = CoreDataHistoryFetcher(),
-        merger: CoreDataHistoryMerging = CoreDataHistoryMerger()
+        merger: CoreDataHistoryMerging = CoreDataHistoryMerger(),
+        logger: SDKLoggerProtocol? = nil
     ) {
         self.init(
             contexts: [context],
             timestampManager: timestampManager,
             cleaner: cleaner,
             fetcher: fetcher,
-            merger: merger
+            merger: merger,
+            logger: logger
         )
     }
 
@@ -168,11 +174,20 @@ private extension CoreDataHistoryObserver {
             transactions.forEach { transaction in
                 var userInfo = transaction.objectIDNotification().userInfo ?? [:]
 
-                let tombstones = (transaction.changes ?? [])
-                    .filter { $0.changeType == .delete }
-                    .compactMap { change in
-                        change.tombstone.map { CoreDataHistoryTombstone(objectID: change.changedObjectID, values: $0) }
-                    }
+                let deletes = (transaction.changes ?? []).filter { $0.changeType == .delete }
+
+                let tombstones = deletes.compactMap { change in
+                    change.tombstone.map { CoreDataHistoryTombstone(objectID: change.changedObjectID, values: $0) }
+                }
+
+                if tombstones.count < deletes.count {
+                    // The rows are already gone; without a tombstone nothing identifies them to observers.
+                    self.logger?.warning(
+                        "\(deletes.count - tombstones.count) remote delete(s) carried no persistent-history "
+                        + "tombstone and cannot be delivered to observers. Mark the identifier attribute with "
+                        + "Preserve After Deletion in the model."
+                    )
+                }
 
                 if !tombstones.isEmpty {
                     userInfo[Self.tombstonesKey] = tombstones
