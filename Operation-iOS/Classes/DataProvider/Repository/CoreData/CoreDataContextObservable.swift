@@ -307,11 +307,25 @@ private extension CoreDataContextObservable {
     }
 
     func change(for entity: U, inserted: Bool) -> DataProviderChange<T>? {
-        guard predicate(entity), let model = try? mapper.transform(entity: entity) else {
+        // Someone else's row. The ordinary case on any shared entity, and not worth a word.
+        guard predicate(entity) else {
             return nil
         }
 
-        return inserted ? .insert(newItem: model) : .update(newItem: model)
+        do {
+            let model = try mapper.transform(entity: entity)
+
+            return inserted ? .insert(newItem: model) : .update(newItem: model)
+        } catch {
+            // Dropping one unreadable row beats losing the batch, but dropping it in silence is
+            // indistinguishable from "nothing relevant changed" — which is exactly how a mapper or model
+            // defect hides, and how it stays hidden while someone debugs the observable instead.
+            service.configuration.logger?.error(
+                "\(entityName) row could not be mapped and was dropped from the delivered changes: \(error)"
+            )
+
+            return nil
+        }
     }
 
     /// Materialises the committed rows for ```objectIDs```; rows that are gone are absent from the result.

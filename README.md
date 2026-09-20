@@ -39,6 +39,9 @@ a snapshot of the commit that triggered it. Every delivered state is a committed
 reflects the last commit, but back-to-back saves may coalesce intermediate states. Each delivered change is
 derived from the current row, not from the notification's category:
 
+A row the mapper cannot read is dropped from the batch rather than failing it, and reported through the
+configured `logger` — a silent drop looks exactly like "nothing relevant changed".
+
 - the row exists and matches the predicate: `insert` or `update`;
 - the row does not match the predicate: skipped;
 - the row is gone: skipped, because the save that removed it delivers the `delete` itself.
