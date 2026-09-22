@@ -434,23 +434,28 @@ extension CoreDataService: CoreDataServiceProtocol {
             }
         }
     }
+}
 
-    /// Hands both contexts over under the lock, the same window ```coreDataServiceDidOpen``` uses: a
-    /// listener that registers here is in place before any transaction queued on the writer can commit.
-    /// Reports ```false``` only when the store could not be opened, leaving the caller to surface the
-    /// failure through ```performWithObserver```.
-    public func performWithObserverSynchronously(
-        _ block: (NSManagedObjectContext, NSManagedObjectContext) -> Void
+// MARK: - CoreDataSynchronousContextAccess
+
+extension CoreDataService: CoreDataSynchronousContextAccess {
+    /// Resolves the roles the same way ```coreDataServiceDidOpen``` is posted — under the lock, so the
+    /// store cannot be closed and reopened between resolving the contexts and binding to them. Reports
+    /// ```false``` only when the store could not be opened, leaving the caller to surface the failure
+    /// through ```performWithObserver```.
+    func withRolesUnderLock(
+        _ block: (NSManagedObjectContext, NSManagedObjectContext, NSPersistentStoreCoordinator) -> Void
     ) -> Bool {
         var didRun = false
 
         withRoles(onFailure: { _ in }) { roles in
-            block(roles.writer, roles.observer)
+            block(roles.writer, roles.observer, roles.coordinator)
             didRun = true
         }
 
         return didRun
     }
+
 
     /// Detaches the roles under the lock, then drains them with the lock released: queued work may call back
     /// into the service (a read completion issuing another read, an observable reacting to a save), and those

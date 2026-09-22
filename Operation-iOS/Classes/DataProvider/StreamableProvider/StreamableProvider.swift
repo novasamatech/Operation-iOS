@@ -123,20 +123,25 @@ public final class StreamableProvider<T: Identifiable> {
                              executing updateBlock: @escaping ([DataProviderChange<Model>]) -> Void,
                              failing failureBlock: @escaping (Error) -> Void,
                              options: StreamableProviderObserverOptions) {
-        guard
-            let pending = pendingObservers.first(where: { $0.observer === observer }),
-            let result = pending.operation?.result else {
+        let pending = pendingObservers.first(where: { $0.observer === observer })
+
+        // Released before the snapshot is inspected, so a cancelled one leaves nothing behind: a buffer
+        // nobody will drain keeps growing with every later change, and a pending entry nobody will clear
+        // pins the source subscription for the provider's lifetime.
+        pendingObservers = self.pendingObservers
+            .filter { $0.observer != nil && $0.observer !== observer}
+
+        let buffered = takePendingChanges(for: observer)
+
+        guard let result = pending?.operation?.result else {
+            stopObservingSourceIfUnused()
+
             dispatchInQueueWhenPossible(queue) {
                 failureBlock(DataProviderError.dependencyCancelled)
             }
 
             return
         }
-
-        pendingObservers = self.pendingObservers
-            .filter { $0.observer != nil && $0.observer !== observer}
-
-        let buffered = takePendingChanges(for: observer)
 
         switch result {
         case .success(let items):
@@ -176,7 +181,13 @@ public final class StreamableProvider<T: Identifiable> {
         return pendingChanges.remove(at: index).changes
     }
 
+    /// Prunes first: an observer that was deallocated without being removed would otherwise pin the
+    /// subscription for the provider's lifetime.
     private func stopObservingSourceIfUnused() {
+        observers = observers.filter { $0.observer != nil }
+        pendingObservers = pendingObservers.filter { $0.observer != nil }
+        pendingChanges = pendingChanges.filter { $0.observer != nil }
+
         guard observers.isEmpty, pendingObservers.isEmpty else {
             return
         }

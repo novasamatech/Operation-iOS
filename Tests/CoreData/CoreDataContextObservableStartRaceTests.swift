@@ -6,12 +6,14 @@ import Helpers
 #endif
 
 /**
- *  ```start``` binds to the writer after a hop onto the writer's own queue, so a transaction already
- *  enqueued there when ```start``` is called commits — and posts its did-save — before the binding
- *  exists. The change is then delivered to no one and never re-read.
+ *  ```start``` used to bind from a block hopped onto the writer's own queue, so a transaction already
+ *  queued there when ```start``` was called always commited — and posted its did-save — first. The change
+ *  was then delivered to no one and never re-read.
  *
- *  Both ```performWrite``` and ```start``` enqueue their blocks on the writer synchronously, in
- *  program order, so the interleaving below is deterministic rather than raced for.
+ *  The writer is held busy below, so the transaction is provably still queued and uncommitted at the
+ *  moment ```start``` is called: that is the ordering the fix owns, and it is pinned here rather than
+ *  raced for. A transaction that commits while ```start``` is registering is a genuine race and is not
+ *  what this test asserts.
  */
 class CoreDataContextObservableStartRaceTests: XCTestCase {
     override func setUp() {
@@ -65,6 +67,14 @@ class CoreDataContextObservableStartRaceTests: XCTestCase {
 
         // when
 
+        // Occupies the writer, so the transaction below is queued behind it and cannot commit until the
+        // gate is released — no matter how long registering takes.
+        let gate = DispatchSemaphore(value: 0)
+
+        service.performAsync { _, _ in
+            gate.wait()
+        }
+
         let writeExpectation = XCTestExpectation()
 
         service.performWrite({ context in
@@ -80,6 +90,8 @@ class CoreDataContextObservableStartRaceTests: XCTestCase {
         observable.start { error in
             XCTAssertNil(error)
         }
+
+        gate.signal()
 
         wait(for: [writeExpectation], timeout: Constants.expectationDuration)
 

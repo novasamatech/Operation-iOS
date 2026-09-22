@@ -19,19 +19,21 @@ extension SingleValueProvider {
                              executing updateBlock: @escaping ([DataProviderChange<Model>]) -> Void,
                              failing failureBlock: @escaping (Error) -> Void,
                              options: DataProviderObserverOptions) {
-        guard
-            let pending = pendingObservers.first(where: { $0.observer === observer }),
-            let result = pending.operation?.result else {
+        let pending = pendingObservers.first(where: { $0.observer === observer })
+
+        // Released before the snapshot is inspected: a buffer left behind by a cancelled snapshot would
+        // never be drained and would keep growing with every later synchronization.
+        pendingObservers = pendingObservers.filter { $0.observer != nil && $0.observer !== observer }
+
+        let buffered = takePendingChanges(for: observer)
+
+        guard let result = pending?.operation?.result else {
             dispatchInQueueWhenPossible(queue) {
                 failureBlock(DataProviderError.dependencyCancelled)
             }
 
             return
         }
-
-        pendingObservers = pendingObservers.filter { $0.observer != nil && $0.observer !== observer }
-
-        let buffered = takePendingChanges(for: observer)
 
         switch result {
         case .success(let optionalEntity):
