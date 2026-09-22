@@ -442,10 +442,38 @@ private extension CoreDataContextObservable {
 extension CoreDataContextObservable: DataProviderRepositoryObservable {
     public typealias Model = T
 
-    /// One hop on the writer's queue: registers for its saves and captures the observer context, so a save
-    /// issued right after ```start``` is observed and no second service call can race a ```close()```.
+    /// Registers for the writer's saves before returning, while the service holds its lock, so a
+    /// transaction already queued on the writer cannot commit before the registration exists — a hop onto
+    /// the writer's queue would run behind that transaction and lose its did-save. Services that cannot
+    /// hand both contexts over synchronously keep the hop, and with it that window.
     public func start(completionBlock: @escaping (Error?) -> Void) {
         let generation = currentGeneration
+
+        var boundWriter: NSManagedObjectContext?
+
+        let didBindSynchronously = service.performWithObserverSynchronously { writer, observer in
+            let bound = bind(
+                writer: writer,
+                observer: observer,
+                onlyWhenStarted: false,
+                expecting: generation
+            )
+
+            if bound {
+                boundWriter = writer
+            }
+        }
+
+        if didBindSynchronously {
+            // Outside the service lock: this reads the model, and a handler must not call back in.
+            if let boundWriter {
+                warnIfRemoteDeletesCannotArrive(checking: boundWriter)
+            }
+
+            completionBlock(nil)
+
+            return
+        }
 
         service.performWithObserver { [weak self] writer, observer, error in
             guard let self else {

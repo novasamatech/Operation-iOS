@@ -30,3 +30,23 @@ struct DataProviderPendingObserver<T> {
         self.operation = operation
     }
 }
+
+/**
+ *  Changes that arrived while an observer's snapshot was being fetched. Holding them here rather than
+ *  dropping them is what closes the window between reading the snapshot and registering the observer:
+ *  they are folded into the snapshot when the observer is delivered.
+ *
+ *  One buffer per pending observer, never a shared one: a change is newer than the snapshot only of an
+ *  observer that was already waiting when it arrived.
+ *
+ *  Data changes only. A refresh that produced nothing, and a failed synchronization, are signals about an
+ *  event the joining observer did not witness and are not replayed to it.
+ */
+final class DataProviderPendingChanges<T> {
+    private(set) weak var observer: AnyObject?
+    var changes: [DataProviderChange<T>] = []
+
+    init(observer: AnyObject) {
+        self.observer = observer
+    }
+}

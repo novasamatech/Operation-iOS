@@ -6,6 +6,14 @@ extension DataProvider {
         observers.contains(where: { $0.observer === observer })
     }
 
+    func takePendingChanges(for observer: AnyObject) -> [DataProviderChange<T>] {
+        guard let index = pendingChanges.firstIndex(where: { $0.observer === observer }) else {
+            return []
+        }
+
+        return pendingChanges.remove(at: index).changes
+    }
+
     private func completeAdd(observer: AnyObject,
                              deliverOn queue: DispatchQueue?,
                              executing updateBlock: @escaping ([DataProviderChange<Model>]) -> Void,
@@ -23,6 +31,8 @@ extension DataProvider {
 
         pendingObservers = pendingObservers.filter { $0.observer != nil && $0.observer !== observer }
 
+        let buffered = takePendingChanges(for: observer)
+
         switch result {
         case .success(let items):
             let repositoryObserver = DataProviderObserver(observer: observer,
@@ -34,7 +44,7 @@ extension DataProvider {
 
             self.updateTrigger.receive(event: .addObserver(observer))
 
-            let updates = items.map { DataProviderChange<T>.insert(newItem: $0) }
+            let updates = DataProviderChange.reconcile(snapshot: items, with: buffered)
 
             dispatchInQueueWhenPossible(queue) {
                 updateBlock(updates)
@@ -185,6 +195,10 @@ extension DataProvider: DataProviderProtocol {
                                                       operation: repositoryOperation)
             self.pendingObservers.append(pending)
 
+            // Before the snapshot is enqueued: a sync that commits after it is read must land in this
+            // observer's buffer instead of in the gap between the snapshot and its registration.
+            self.pendingChanges.append(DataProviderPendingChanges<T>(observer: observer))
+
             repositoryOperation.completionBlock = {
                 self.syncQueue.async {
                     self.completeAdd(observer: observer,
@@ -215,6 +229,9 @@ extension DataProvider: DataProviderProtocol {
             }
 
             self.pendingObservers = self.pendingObservers
+                .filter { $0.observer != nil && $0.observer !== observer }
+
+            self.pendingChanges = self.pendingChanges
                 .filter { $0.observer != nil && $0.observer !== observer }
 
             self.observers = self.observers.filter { $0.observer !== observer && $0.observer != nil}

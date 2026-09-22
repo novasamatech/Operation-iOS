@@ -12,6 +12,12 @@ public final class StreamableProvider<T: Identifiable> {
     var observers: [DataProviderObserver<T, StreamableProviderObserverOptions>] = []
     var pendingObservers: [DataProviderPendingObserver<[T]>] = []
 
+    /// Source changes buffered per pending observer. The provider starts observing the source before the
+    /// snapshot fetch is enqueued, so a change committed while an observer is being added is held here
+    /// rather than falling between the snapshot and that observer's registration.
+    private var pendingChanges: [DataProviderPendingChanges<T>] = []
+    private var isObservingSource: Bool = false
+
     public init(source: AnyStreamableSource<T>,
                 repository: AnyDataProviderRepository<T>,
                 observable: AnyDataProviderRepositoryObservable<T>,
@@ -31,14 +37,36 @@ public final class StreamableProvider<T: Identifiable> {
         }
     }
 
-    private func startObservingSource() {
+    private func startObservingSourceIfNeeded() {
+        guard !isObservingSource else {
+            return
+        }
+
+        isObservingSource = true
+
         observable.addObserver(self, deliverOn: processingQueue) { [weak self] (changes) in
-            self?.notifyObservers(with: changes)
+            self?.handleSourceChanges(changes)
         }
     }
 
     private func stopObservingSource() {
+        guard isObservingSource else {
+            return
+        }
+
+        isObservingSource = false
+
         observable.removeObserver(self)
+    }
+
+    /// Runs on ```processingQueue```, the same queue ```addObserver``` and ```completeAdd``` run on, so an
+    /// observer is either still buffering or already registered when a change arrives — never neither.
+    private func handleSourceChanges(_ changes: [DataProviderChange<Model>]) {
+        pendingChanges = pendingChanges.filter { $0.observer != nil }
+
+        pendingChanges.forEach { $0.changes.append(contentsOf: changes) }
+
+        notifyObservers(with: changes)
     }
 
     private func fetchHistory(completionBlock: ((Result<Int, Error>?) -> Void)?) {
@@ -108,10 +136,10 @@ public final class StreamableProvider<T: Identifiable> {
         pendingObservers = self.pendingObservers
             .filter { $0.observer != nil && $0.observer !== observer}
 
+        let buffered = takePendingChanges(for: observer)
+
         switch result {
         case .success(let items):
-            let shouldObserveSource = self.observers.isEmpty
-
             self.observers = self.observers.filter { $0.observer != nil }
 
             let repositoryObserver = DataProviderObserver(observer: observer,
@@ -121,14 +149,10 @@ public final class StreamableProvider<T: Identifiable> {
                                                           options: options)
             self.observers.append(repositoryObserver)
 
-            let updates = items.map { DataProviderChange<T>.insert(newItem: $0) }
+            let updates = DataProviderChange.reconcile(snapshot: items, with: buffered)
 
             dispatchInQueueWhenPossible(queue) {
                 updateBlock(updates)
-            }
-
-            if shouldObserveSource {
-                self.startObservingSource()
             }
 
             if updates.isEmpty, options.refreshWhenEmpty {
@@ -136,10 +160,28 @@ public final class StreamableProvider<T: Identifiable> {
             }
 
         case .failure(let error):
+            stopObservingSourceIfUnused()
+
             dispatchInQueueWhenPossible(queue) {
                 failureBlock(error)
             }
         }
+    }
+
+    private func takePendingChanges(for observer: AnyObject) -> [DataProviderChange<T>] {
+        guard let index = pendingChanges.firstIndex(where: { $0.observer === observer }) else {
+            return []
+        }
+
+        return pendingChanges.remove(at: index).changes
+    }
+
+    private func stopObservingSourceIfUnused() {
+        guard observers.isEmpty, pendingObservers.isEmpty else {
+            return
+        }
+
+        stopObservingSource()
     }
 }
 
@@ -219,6 +261,11 @@ extension StreamableProvider: StreamableProviderProtocol {
                                                       operation: operation)
             self.pendingObservers.append(pending)
 
+            // Before the fetch is enqueued: a change committed after the snapshot is read must land in
+            // this observer's buffer instead of in the gap between the snapshot and its registration.
+            self.pendingChanges.append(DataProviderPendingChanges<T>(observer: observer))
+            self.startObservingSourceIfNeeded()
+
             operation.completionBlock = {
                 self.processingQueue.async {
                     self.completeAdd(observer: observer,
@@ -247,12 +294,12 @@ extension StreamableProvider: StreamableProviderProtocol {
             self.pendingObservers = self.pendingObservers
                 .filter { $0.observer != nil && $0.observer !== observer }
 
-            let wasObservingSource = !self.observers.isEmpty
+            self.pendingChanges = self.pendingChanges
+                .filter { $0.observer != nil && $0.observer !== observer }
+
             self.observers = self.observers.filter { $0.observer != nil && $0.observer !== observer }
 
-            if wasObservingSource, self.observers.isEmpty {
-                self.stopObservingSource()
-            }
+            self.stopObservingSourceIfUnused()
         }
     }
 }

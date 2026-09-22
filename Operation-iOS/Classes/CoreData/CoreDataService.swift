@@ -435,6 +435,23 @@ extension CoreDataService: CoreDataServiceProtocol {
         }
     }
 
+    /// Hands both contexts over under the lock, the same window ```coreDataServiceDidOpen``` uses: a
+    /// listener that registers here is in place before any transaction queued on the writer can commit.
+    /// Reports ```false``` only when the store could not be opened, leaving the caller to surface the
+    /// failure through ```performWithObserver```.
+    public func performWithObserverSynchronously(
+        _ block: (NSManagedObjectContext, NSManagedObjectContext) -> Void
+    ) -> Bool {
+        var didRun = false
+
+        withRoles(onFailure: { _ in }) { roles in
+            block(roles.writer, roles.observer)
+            didRun = true
+        }
+
+        return didRun
+    }
+
     /// Detaches the roles under the lock, then drains them with the lock released: queued work may call back
     /// into the service (a read completion issuing another read, an observable reacting to a save), and those
     /// calls must find a free lock rather than deadlock. Work arriving while the drain is running is rejected

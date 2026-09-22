@@ -6,6 +6,14 @@ extension SingleValueProvider {
         observers.contains(where: { $0.observer === observer })
     }
 
+    func takePendingChanges(for observer: AnyObject) -> [DataProviderChange<T>] {
+        guard let index = pendingChanges.firstIndex(where: { $0.observer === observer }) else {
+            return []
+        }
+
+        return pendingChanges.remove(at: index).changes
+    }
+
     private func completeAdd(observer: AnyObject,
                              deliverOn queue: DispatchQueue?,
                              executing updateBlock: @escaping ([DataProviderChange<Model>]) -> Void,
@@ -23,6 +31,8 @@ extension SingleValueProvider {
 
         pendingObservers = pendingObservers.filter { $0.observer != nil && $0.observer !== observer }
 
+        let buffered = takePendingChanges(for: observer)
+
         switch result {
         case .success(let optionalEntity):
             let repositoryObserver = DataProviderObserver(observer: observer,
@@ -34,12 +44,11 @@ extension SingleValueProvider {
 
             self.updateTrigger.receive(event: .addObserver(observer))
 
-            var updates: [DataProviderChange<T>] = []
-
-            if let entity = optionalEntity,
-                let model = try? self.decoder.decode(T.self, from: entity.payload) {
-                updates.append(DataProviderChange.insert(newItem: model))
+            let snapshot = optionalEntity.flatMap {
+                try? self.decoder.decode(T.self, from: $0.payload)
             }
+
+            let updates = DataProviderChange.reconcile(snapshot: snapshot, with: buffered)
 
             dispatchInQueueWhenPossible(queue) {
                 updateBlock(updates)
@@ -127,6 +136,10 @@ extension SingleValueProvider: SingleValueProviderProtocol {
                                                       operation: repositoryOperation)
             self.pendingObservers.append(pending)
 
+            // Before the snapshot is enqueued: a sync that commits after it is read must land in this
+            // observer's buffer instead of in the gap between the snapshot and its registration.
+            self.pendingChanges.append(DataProviderPendingChanges<T>(observer: observer))
+
             repositoryOperation.completionBlock = {
                 self.syncQueue.async {
                     self.completeAdd(observer: observer,
@@ -156,6 +169,9 @@ extension SingleValueProvider: SingleValueProviderProtocol {
             }
 
             self.pendingObservers = self.pendingObservers
+                .filter { $0.observer != nil && $0.observer !== observer }
+
+            self.pendingChanges = self.pendingChanges
                 .filter { $0.observer != nil && $0.observer !== observer }
 
             self.observers = self.observers.filter { $0.observer !== observer && $0.observer != nil}

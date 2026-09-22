@@ -13,6 +13,22 @@ public func modifyRepository<T: Identifiable>(_ repository: AnyDataProviderRepos
     try handleOperation(operation, handler: handler, enqueueClosure: enqueueClosure)
 }
 
+/// Saves and waits without an ```XCTestExpectation```, so it can also be called from a background thread
+/// such as a repository hook.
+public func saveSync<T: Identifiable>(_ items: [T], to repository: AnyDataProviderRepository<T>) {
+    let operation = repository.saveOperation({ items }, { [] })
+
+    let semaphore = DispatchSemaphore(value: 0)
+
+    operation.completionBlock = {
+        semaphore.signal()
+    }
+
+    OperationQueue().addOperation(operation)
+
+    semaphore.wait()
+}
+
 public func deleteAllFromRepository<T: Identifiable>(_ repository: AnyDataProviderRepository<T>,
                                               handler: XCTestCase,
                                               enqueueClosure: OperationEnqueuClosure? = nil) throws {

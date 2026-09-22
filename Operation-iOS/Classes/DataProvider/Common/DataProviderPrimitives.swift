@@ -42,6 +42,66 @@ public enum DataProviderChange<T> {
     }
 }
 
+extension DataProviderChange {
+    /**
+     *  Collapses changes that arrived while a single value's snapshot was being fetched: the last of them
+     *  is the state at the moment the observer was registered. A value deleted inside that window is
+     *  delivered as nothing at all, the way an observer registered after the delete would see it.
+     *
+     *  Only changes newer than the snapshot may be passed.
+     */
+    static func reconcile(snapshot: T?, with changes: [DataProviderChange<T>]) -> [DataProviderChange<T>] {
+        guard let latest = changes.last else {
+            return snapshot.map { [DataProviderChange<T>.insert(newItem: $0)] } ?? []
+        }
+
+        switch latest {
+        case .insert(let item), .update(let item):
+            return [DataProviderChange<T>.insert(newItem: item)]
+        case .delete:
+            return []
+        }
+    }
+}
+
+extension DataProviderChange where T: Identifiable {
+    /**
+     *  Folds changes that arrived while ```snapshot``` was being fetched into it, so a joining observer's
+     *  first delivery is the state at the moment it was registered rather than at the moment the snapshot
+     *  was read: one insert per live item, nothing for an item that came and went inside that window, and
+     *  no duplicate for an item the snapshot already carried.
+     *
+     *  Only changes newer than the snapshot may be passed. An item the snapshot did not carry joins at the
+     *  end, where it would have arrived had it been delivered as its own change.
+     */
+    static func reconcile(snapshot: [T], with changes: [DataProviderChange<T>]) -> [DataProviderChange<T>] {
+        guard !changes.isEmpty else {
+            return snapshot.map { DataProviderChange<T>.insert(newItem: $0) }
+        }
+
+        var identifiers = snapshot.map { $0.identifier }
+        var itemsByIdentifier = snapshot.reduce(into: [String: T]()) { $0[$1.identifier] = $1 }
+
+        for change in changes {
+            switch change {
+            case .insert(let item), .update(let item):
+                if itemsByIdentifier[item.identifier] == nil {
+                    identifiers.append(item.identifier)
+                }
+
+                itemsByIdentifier[item.identifier] = item
+            case .delete(let identifier):
+                if itemsByIdentifier.removeValue(forKey: identifier) != nil {
+                    identifiers.removeAll { $0 == identifier }
+                }
+            }
+        }
+
+        return identifiers.compactMap { itemsByIdentifier[$0] }
+            .map { DataProviderChange<T>.insert(newItem: $0) }
+    }
+}
+
 /**
  *  Struct designed to store options needed to describe how an observer should be handled by data provider.
  */
@@ -52,10 +112,13 @@ public struct DataProviderObserverOptions {
     /// there are changes after synchronization.
     public var alwaysNotifyOnRefresh: Bool
 
-    /// Asks data provider to wait until any in progress synchronization completes before adding the observer.
+    /// Asks data provider to wait until any in progress synchronization completes before reading the
+    /// snapshot a new observer is given.
     /// By default the value is `true`.
-    /// - note: Passing `false` may significantly improve performance however may also introduce inconsitency between
-    /// observer's local data and persistent data if a repository doesn't have any synchronization mechanism.
+    /// - note: This is a freshness knob, not a correctness one: a synchronization that commits while an
+    /// observer is being added is buffered and folded into its first delivery either way. Passing `false`
+    /// may significantly improve performance, at the cost of an observer's first delivery being a state
+    /// the in progress synchronization is about to supersede.
     public var waitsInProgressSyncOnAdd: Bool
 
     /// - parameters:
@@ -63,9 +126,9 @@ public struct DataProviderObserverOptions {
     ///    Default value is `false`.
     ///
     ///    - waitsInProgressSyncOnAdd: Asks data provider to wait until any in progress synchronization
-    ///    completes before adding the observer. Default value is `true`. Passing `false` may significantly
-    ///    improve performance however may also introduce inconsitency between observer's local data and
-    ///    persistent data if a repository doesn't have any synchronization mechanism.
+    ///    completes before reading the snapshot a new observer is given. Default value is `true`. Passing
+    ///    `false` may significantly improve performance, at the cost of a first delivery that an in
+    ///    progress synchronization is about to supersede; no change is lost either way.
 
     public init(alwaysNotifyOnRefresh: Bool = false,
                 waitsInProgressSyncOnAdd: Bool = true) {
@@ -85,11 +148,12 @@ public struct StreamableProviderObserverOptions {
     /// there are changes after synchronization.
     public var alwaysNotifyOnRefresh: Bool
 
-    /// Asks data provider to wait until any in progress synchronization completes before adding the observer.
+    /// Asks data provider to wait until any in progress synchronization completes before reading the
+    /// snapshot a new observer is given.
     /// By default the value is `true`.
-    /// - note: Passing `false` may significantly improve performance however may also introduce inconsitency
-    /// between observer's local data and persistent data if a repository
-    /// doesn't have any synchronization mechanism.
+    /// - note: This is a freshness knob, not a correctness one, and it never covered changes arriving from
+    /// the repository observable. A change committed while an observer is being added is buffered and
+    /// folded into its first delivery either way.
     public var waitsInProgressSyncOnAdd: Bool
 
     /// Number of items to fetch from local store and return in update block call after
@@ -108,9 +172,9 @@ public struct StreamableProviderObserverOptions {
     ///    Default value is `false`.
     ///
     ///    - waitsInProgressSyncOnAdd: Asks data provider to wait until any in progress synchronization
-    ///    completes before adding the observer. Default value is `true`. Passing `false` may significantly
-    ///    improve performance however may also introduce inconsitency between observer's local data and
-    ///    persistent data if a repository doesn't have any synchronization mechanism.
+    ///    completes before reading the snapshot a new observer is given. Default value is `true`. Passing
+    ///    `false` may significantly improve performance, at the cost of a first delivery that an in
+    ///    progress synchronization is about to supersede; no change is lost either way.
     ///
     ///    - initialSize: Number of items to fetch from local store and return in update block call after
     ///     observer successfully added. If the value is less or equal to zero than all
