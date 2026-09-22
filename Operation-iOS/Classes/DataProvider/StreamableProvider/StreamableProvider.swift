@@ -119,11 +119,25 @@ public final class StreamableProvider<T: Identifiable> {
     }
 
     private func completeAdd(observer: AnyObject,
+                             operation: BaseOperation<[T]>,
                              deliverOn queue: DispatchQueue,
                              executing updateBlock: @escaping ([DataProviderChange<Model>]) -> Void,
                              failing failureBlock: @escaping (Error) -> Void,
                              options: StreamableProviderObserverOptions) {
-        let pending = pendingObservers.first(where: { $0.observer === observer })
+        // Keyed on the operation, not on the observer: cancelling a subscription finishes its snapshot
+        // operation, so this can run for a subscription that has already been replaced by a newer one for
+        // the same observer object. Releasing that newer subscription's entry and buffer here would leave
+        // it unable to ever complete.
+        guard
+            let pending = pendingObservers.first(where: { $0.observer === observer }),
+            pending.operation === operation
+        else {
+            dispatchInQueueWhenPossible(queue) {
+                failureBlock(DataProviderError.dependencyCancelled)
+            }
+
+            return
+        }
 
         // Released before the snapshot is inspected, so a cancelled one leaves nothing behind: a buffer
         // nobody will drain keeps growing with every later change, and a pending entry nobody will clear
@@ -133,7 +147,7 @@ public final class StreamableProvider<T: Identifiable> {
 
         let buffered = takePendingChanges(for: observer)
 
-        guard let result = pending?.operation?.result else {
+        guard let result = operation.result else {
             stopObservingSourceIfUnused()
 
             dispatchInQueueWhenPossible(queue) {
@@ -154,7 +168,15 @@ public final class StreamableProvider<T: Identifiable> {
                                                           options: options)
             self.observers.append(repositoryObserver)
 
-            let updates = DataProviderChange.reconcile(snapshot: items, with: buffered)
+            let reconciled = DataProviderChange.reconcile(snapshot: items, with: buffered)
+
+            // ```initialSize``` caps the snapshot the repository is asked for, so it has to cap what the
+            // buffer adds to it too — an observer that asked for a window must not be handed more than it
+            // on first delivery. Anything beyond the window arrives the way it always did: as its own
+            // change, or through ```fetch(offset:count:)```.
+            let updates = options.initialSize > 0
+                ? Array(reconciled.prefix(options.initialSize))
+                : reconciled
 
             dispatchInQueueWhenPossible(queue) {
                 updateBlock(updates)
@@ -280,6 +302,7 @@ extension StreamableProvider: StreamableProviderProtocol {
             operation.completionBlock = {
                 self.processingQueue.async {
                     self.completeAdd(observer: observer,
+                                     operation: operation,
                                      deliverOn: queue,
                                      executing: updateBlock,
                                      failing: failureBlock,

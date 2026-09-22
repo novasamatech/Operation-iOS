@@ -15,11 +15,25 @@ extension DataProvider {
     }
 
     private func completeAdd(observer: AnyObject,
+                             operation: BaseOperation<[T]>,
                              deliverOn queue: DispatchQueue?,
                              executing updateBlock: @escaping ([DataProviderChange<Model>]) -> Void,
                              failing failureBlock: @escaping (Error) -> Void,
                              options: DataProviderObserverOptions) {
-        let pending = pendingObservers.first(where: { $0.observer === observer })
+        // Keyed on the operation, not on the observer: cancelling a subscription finishes its snapshot
+        // operation, so this can run for a subscription that has already been replaced by a newer one for
+        // the same observer object. Releasing that newer subscription's entry and buffer here would leave
+        // it unable to ever complete.
+        guard
+            let pending = pendingObservers.first(where: { $0.observer === observer }),
+            pending.operation === operation
+        else {
+            dispatchInQueueWhenPossible(queue) {
+                failureBlock(DataProviderError.dependencyCancelled)
+            }
+
+            return
+        }
 
         // Released before the snapshot is inspected: a buffer left behind by a cancelled snapshot would
         // never be drained and would keep growing with every later synchronization.
@@ -27,7 +41,7 @@ extension DataProvider {
 
         let buffered = takePendingChanges(for: observer)
 
-        guard let result = pending?.operation?.result else {
+        guard let result = operation.result else {
             dispatchInQueueWhenPossible(queue) {
                 failureBlock(DataProviderError.dependencyCancelled)
             }
@@ -204,6 +218,7 @@ extension DataProvider: DataProviderProtocol {
             repositoryOperation.completionBlock = {
                 self.syncQueue.async {
                     self.completeAdd(observer: observer,
+                                     operation: repositoryOperation,
                                      deliverOn: queue,
                                      executing: updateBlock,
                                      failing: failureBlock,

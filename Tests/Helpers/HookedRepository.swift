@@ -16,6 +16,10 @@ public final class HookedRepository<T: Identifiable>: DataProviderRepositoryProt
     /// Runs after ```fetchOperation(by:options:)``` has read the value, before it reports completion.
     public var afterFetchById: (() -> Void)?
 
+    /// Runs after ```fetchOperation(by request:options:)``` has read the slice, before it reports
+    /// completion.
+    public var afterFetchSlice: (() -> Void)?
+
     private let wrapped: AnyDataProviderRepository<T>
     private let innerQueue = OperationQueue()
 
@@ -38,7 +42,9 @@ public final class HookedRepository<T: Identifiable>: DataProviderRepositoryProt
 
     public func fetchOperation(by request: RepositorySliceRequest,
                                options: RepositoryFetchOptions) -> BaseOperation<[Model]> {
-        wrapped.fetchOperation(by: request, options: options)
+        hooking(wrapped.fetchOperation(by: request, options: options)) { [weak self] in
+            self?.afterFetchSlice?()
+        }
     }
 
     public func saveOperation(_ updateModelsBlock: @escaping () throws -> [Model],
