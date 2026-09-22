@@ -54,6 +54,11 @@ public final class SingleValueProvider<T: Codable & Equatable> {
 
     var observers: [DataProviderObserver<T, DataProviderObserverOptions>] = []
     var pendingObservers: [DataProviderPendingObserver<SingleValueProviderObject?>] = []
+
+    /// Synchronization results buffered per pending observer, so a sync that commits while an observer is
+    /// being added is not lost between that observer's snapshot and its registration.
+    var pendingChanges: [DataProviderPendingChanges<T>] = []
+
     weak var lastSyncOperation: Operation?
     weak var repositoryUpdateOperation: Operation?
 
@@ -254,6 +259,14 @@ extension SingleValueProvider {
     }
 
     private func notifyObservers(with update: DataProviderChange<T>?) {
+        // Runs on ```syncQueue```, the queue observers are registered on, so an observer is either still
+        // buffering or already registered when a sync commits — never neither.
+        if let update {
+            pendingChanges = pendingChanges.filter { $0.observer != nil }
+
+            pendingChanges.forEach { $0.changes.append(update) }
+        }
+
         observers.forEach { (repositoryObserver) in
             if repositoryObserver.observer != nil,
                 (update != nil || repositoryObserver.options.alwaysNotifyOnRefresh) {

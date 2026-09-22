@@ -6,14 +6,28 @@ extension SingleValueProvider {
         observers.contains(where: { $0.observer === observer })
     }
 
+    func takePendingChanges(for observer: AnyObject) -> [DataProviderChange<T>] {
+        guard let index = pendingChanges.firstIndex(where: { $0.observer === observer }) else {
+            return []
+        }
+
+        return pendingChanges.remove(at: index).changes
+    }
+
     private func completeAdd(observer: AnyObject,
+                             operation: BaseOperation<SingleValueProviderObject?>,
                              deliverOn queue: DispatchQueue?,
                              executing updateBlock: @escaping ([DataProviderChange<Model>]) -> Void,
                              failing failureBlock: @escaping (Error) -> Void,
                              options: DataProviderObserverOptions) {
+        // Keyed on the operation, not on the observer: cancelling a subscription finishes its snapshot
+        // operation, so this can run for a subscription that has already been replaced by a newer one for
+        // the same observer object. Releasing that newer subscription's entry and buffer here would leave
+        // it unable to ever complete.
         guard
             let pending = pendingObservers.first(where: { $0.observer === observer }),
-            let result = pending.operation?.result else {
+            pending.operation === operation
+        else {
             dispatchInQueueWhenPossible(queue) {
                 failureBlock(DataProviderError.dependencyCancelled)
             }
@@ -21,7 +35,19 @@ extension SingleValueProvider {
             return
         }
 
+        // Released before the snapshot is inspected: a buffer left behind by a cancelled snapshot would
+        // never be drained and would keep growing with every later synchronization.
         pendingObservers = pendingObservers.filter { $0.observer != nil && $0.observer !== observer }
+
+        let buffered = takePendingChanges(for: observer)
+
+        guard let result = operation.result else {
+            dispatchInQueueWhenPossible(queue) {
+                failureBlock(DataProviderError.dependencyCancelled)
+            }
+
+            return
+        }
 
         switch result {
         case .success(let optionalEntity):
@@ -34,12 +60,11 @@ extension SingleValueProvider {
 
             self.updateTrigger.receive(event: .addObserver(observer))
 
-            var updates: [DataProviderChange<T>] = []
-
-            if let entity = optionalEntity,
-                let model = try? self.decoder.decode(T.self, from: entity.payload) {
-                updates.append(DataProviderChange.insert(newItem: model))
+            let snapshot = optionalEntity.flatMap {
+                try? self.decoder.decode(T.self, from: $0.payload)
             }
+
+            let updates = DataProviderChange.reconcile(snapshot: snapshot, with: buffered)
 
             dispatchInQueueWhenPossible(queue) {
                 updateBlock(updates)
@@ -127,9 +152,14 @@ extension SingleValueProvider: SingleValueProviderProtocol {
                                                       operation: repositoryOperation)
             self.pendingObservers.append(pending)
 
+            // Before the snapshot is enqueued: a sync that commits after it is read must land in this
+            // observer's buffer instead of in the gap between the snapshot and its registration.
+            self.pendingChanges.append(DataProviderPendingChanges<T>(observer: observer))
+
             repositoryOperation.completionBlock = {
                 self.syncQueue.async {
                     self.completeAdd(observer: observer,
+                                     operation: repositoryOperation,
                                      deliverOn: queue,
                                      executing: updateBlock,
                                      failing: failureBlock,
@@ -156,6 +186,9 @@ extension SingleValueProvider: SingleValueProviderProtocol {
             }
 
             self.pendingObservers = self.pendingObservers
+                .filter { $0.observer != nil && $0.observer !== observer }
+
+            self.pendingChanges = self.pendingChanges
                 .filter { $0.observer != nil && $0.observer !== observer }
 
             self.observers = self.observers.filter { $0.observer !== observer && $0.observer != nil}

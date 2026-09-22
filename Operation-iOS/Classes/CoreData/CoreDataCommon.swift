@@ -316,4 +316,23 @@ public extension CoreDataServiceProtocol {
             block(context, context, error)
         }
     }
+
+}
+
+/**
+ *  Hands both contexts to ```block``` on the caller's thread, with no queue hop, and reports whether it
+ *  ran. Exists for observables that must have their did-save registration in place before returning:
+ *  ```performWithObserver``` hops onto the writer's queue, which parks the registration behind every
+ *  transaction already queued there and loses each one.
+ *
+ *  - warning: ```block``` runs while the service holds its lock, which is **not** recursive. It must
+ *  capture the contexts and return — using them, or calling any service method from it, deadlocks. This
+ *  is the contract ```coreDataServiceDidOpen``` documents for the same reason, and why both stay internal
+ *  rather than becoming public surface whose only guard is a doc comment. A conformer that cannot deliver
+ *  both contexts synchronously returns ```false```, leaving the caller to ```performWithObserver```.
+ */
+protocol CoreDataSynchronousContextAccess {
+    func withRolesUnderLock(
+        _ block: (NSManagedObjectContext, NSManagedObjectContext, NSPersistentStoreCoordinator) -> Void
+    ) -> Bool
 }

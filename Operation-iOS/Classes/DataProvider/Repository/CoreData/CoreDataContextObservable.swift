@@ -442,10 +442,43 @@ private extension CoreDataContextObservable {
 extension CoreDataContextObservable: DataProviderRepositoryObservable {
     public typealias Model = T
 
-    /// One hop on the writer's queue: registers for its saves and captures the observer context, so a save
-    /// issued right after ```start``` is observed and no second service call can race a ```close()```.
+    /// Registers for the writer's saves before returning, rather than from a block hopped onto the
+    /// writer's queue. That hop ran behind every transaction already queued there and lost each one, which
+    /// no ordering on the caller's side could avoid. Registering here instead means a transaction that is
+    /// still queued when ```start``` is called is observed, and one that commits before ```start```
+    /// returns is carried by any read the caller issues afterwards — between them, nothing is dropped.
+    ///
+    /// It is not a claim that the writer stands still: its queue runs concurrently, so a transaction that
+    /// commits while this is registering is genuinely raced for, and lands on the read side of that pair.
+    /// Services that cannot hand both contexts over synchronously keep the hop, and with it the old window.
     public func start(completionBlock: @escaping (Error?) -> Void) {
         let generation = currentGeneration
+
+        var boundCoordinator: NSPersistentStoreCoordinator?
+
+        let didBindSynchronously = (service as? CoreDataSynchronousContextAccess)?
+            .withRolesUnderLock { writer, observer, coordinator in
+                let bound = bind(
+                    writer: writer,
+                    observer: observer,
+                    onlyWhenStarted: false,
+                    expecting: generation
+                )
+
+                if bound {
+                    boundCoordinator = coordinator
+                }
+            } ?? false
+
+        if didBindSynchronously {
+            if let boundCoordinator {
+                warnIfRemoteDeletesCannotArrive(checking: boundCoordinator)
+            }
+
+            completionBlock(nil)
+
+            return
+        }
 
         service.performWithObserver { [weak self] writer, observer, error in
             guard let self else {
@@ -465,8 +498,8 @@ extension CoreDataContextObservable: DataProviderRepositoryObservable {
                 expecting: generation
             )
 
-            if bound {
-                self.warnIfRemoteDeletesCannotArrive(checking: writer)
+            if bound, let coordinator = writer.persistentStoreCoordinator {
+                self.warnIfRemoteDeletesCannotArrive(checking: coordinator)
             }
 
             completionBlock(nil)
@@ -477,7 +510,9 @@ extension CoreDataContextObservable: DataProviderRepositoryObservable {
     /// an attribute into one only when the model marks it ```preserveAfterDeletion```. Reported here because
     /// the alternative is a consumer discovering, in production, that remote inserts and updates arrive but
     /// deletes never do.
-    private func warnIfRemoteDeletesCannotArrive(checking context: NSManagedObjectContext) {
+    /// Takes the coordinator rather than a context: the model is all this needs, and a context's properties
+    /// may only be read on its own queue — which ```start``` is not on when it binds synchronously.
+    private func warnIfRemoteDeletesCannotArrive(checking coordinator: NSPersistentStoreCoordinator) {
         guard
             case .persistent(let settings) = service.configuration.storageType,
             settings.historyTracking != nil,
@@ -489,7 +524,7 @@ extension CoreDataContextObservable: DataProviderRepositoryObservable {
         // Entities are addressed by class name throughout the library. A model that names them otherwise
         // cannot be checked here, and guessing would be worse than staying quiet.
         guard
-            let entity = context.persistentStoreCoordinator?.managedObjectModel.entitiesByName[entityName],
+            let entity = coordinator.managedObjectModel.entitiesByName[entityName],
             let attribute = entity.attributesByName[mapper.entityIdentifierFieldName],
             !attribute.preservesValueInHistoryOnDeletion
         else {
